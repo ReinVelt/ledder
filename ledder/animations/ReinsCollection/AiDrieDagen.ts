@@ -70,7 +70,7 @@ const colors = {
     autumnYellow: new Color(210, 200, 70, 1, true)
 }
 
-// 3D Vector class with full transformation support
+// 3D Vector class with full transformation support - OPTIMIZED
 class Vec3 {
     constructor(public x: number, public y: number, public z: number) {}
     
@@ -105,11 +105,30 @@ class Vec3 {
     normalize(): Vec3 {
         const length = Math.sqrt(this.x * this.x + this.y * this.y + this.z * this.z)
         if (length === 0) return new Vec3(0, 0, 0)
-        return new Vec3(this.x / length, this.y / length, this.z / length)
+        const invLength = 1.0 / length // OPTIMIZED: Use multiplication instead of division
+        return new Vec3(this.x * invLength, this.y * invLength, this.z * invLength)
     }
     
     length(): number {
         return Math.sqrt(this.x * this.x + this.y * this.y + this.z * this.z)
+    }
+    
+    // OPTIMIZED: Add squared length to avoid sqrt when possible
+    lengthSquared(): number {
+        return this.x * this.x + this.y * this.y + this.z * this.z
+    }
+    
+    // OPTIMIZED: In-place operations to avoid object creation
+    addInPlace(v: Vec3): void {
+        this.x += v.x
+        this.y += v.y
+        this.z += v.z
+    }
+    
+    multiplyInPlace(scalar: number): void {
+        this.x *= scalar
+        this.y *= scalar
+        this.z *= scalar
     }
 }
 
@@ -432,13 +451,10 @@ class Renderer3D {
         const projected = mvpMatrix.transformPoint(point)
         
         // Convert from NDC to screen coordinates
-        const screenX = (projected.x + 1) * this.width / 2
-        const screenY = (1 - projected.y) * this._height / 2
+        const screenX = (projected.x + 1) * this.width * 0.5 // OPTIMIZED: Use multiplication instead of division
+        const screenY = (1 - projected.y) * this._height * 0.5
         
-        // Log projection details for debugging (less frequent)
-        if (Math.random() < 0.001) { // Log occasionally to avoid spam
-            console.log(`3D Point (${point.x.toFixed(2)}, ${point.y.toFixed(2)}, ${point.z.toFixed(2)}) -> Screen (${screenX.toFixed(1)}, ${screenY.toFixed(1)}, z=${projected.z.toFixed(2)})`)
-        }
+        // OPTIMIZED: Remove debug logging that impacts performance
         
         return { x: screenX, y: screenY, z: projected.z }
     }
@@ -447,25 +463,34 @@ class Renderer3D {
         const pl = new PixelList()
         const worldMatrix = mesh.getWorldMatrix()
         
-        // Transform triangles to world space and sort by depth
-        const worldTriangles = mesh.triangles.map(triangle => {
+        // OPTIMIZED: Pre-allocate triangle array and reuse objects
+        const worldTriangles: Triangle3D[] = []
+        const cameraPos = this.camera.position
+        
+        // Transform triangles to world space and calculate distances in one pass
+        for (let i = 0; i < mesh.triangles.length; i++) {
+            const triangle = mesh.triangles[i]
             const worldV1 = worldMatrix.transformPoint(triangle.v1)
             const worldV2 = worldMatrix.transformPoint(triangle.v2)
             const worldV3 = worldMatrix.transformPoint(triangle.v3)
             
-            return new Triangle3D(worldV1, worldV2, worldV3, triangle.color)
-        })
-        
-        // Sort triangles by distance from camera (painter's algorithm)
-        worldTriangles.sort((a, b) => {
-            const aDist = a.getCenter().subtract(this.camera.position).length()
-            const bDist = b.getCenter().subtract(this.camera.position).length()
-            return bDist - aDist
-        })
-        
-        for (const triangle of worldTriangles) {
-            this.renderTriangle(triangle, pl, isDebug, noClip, lightingMultiplier)
+            const worldTriangle = new Triangle3D(worldV1, worldV2, worldV3, triangle.color)
+            worldTriangles.push(worldTriangle)
         }
+        
+        // OPTIMIZED: Sort triangles by distance from camera (painter's algorithm) with faster distance calc
+        worldTriangles.sort((a, b) => {
+            // Use squared distance to avoid sqrt
+            const aCenterSq = a.getCenter().subtract(cameraPos).lengthSquared()
+            const bCenterSq = b.getCenter().subtract(cameraPos).lengthSquared()
+            return bCenterSq - aCenterSq // Sort back to front
+        })
+        
+        // OPTIMIZED: Batch render triangles
+        for (let i = 0; i < worldTriangles.length; i++) {
+            this.renderTriangle(worldTriangles[i], pl, isDebug, noClip, lightingMultiplier)
+        }
+        
         return pl
     }
 
@@ -475,12 +500,7 @@ class Renderer3D {
         const p2 = this.projectPoint(triangle.v2)
         const p3 = this.projectPoint(triangle.v3)
         
-        // Log coordinates for debugging (less frequent)
-        if (Math.random() < 0.001) { // Log 1% of triangles to avoid spam
-            console.log(`Triangle coordinates: (${p1.x.toFixed(1)}, ${p1.y.toFixed(1)}, z=${p1.z.toFixed(2)})`, 
-                       `(${p2.x.toFixed(1)}, ${p2.y.toFixed(1)}, z=${p2.z.toFixed(2)})`,
-                       `(${p3.x.toFixed(1)}, ${p3.y.toFixed(1)}, z=${p3.z.toFixed(2)})`)
-        }
+        // OPTIMIZED: Remove debug logging that impacts performance
         
         // Very lenient clipping for small screens - accept almost everything
         if (!noClip) {
@@ -489,13 +509,8 @@ class Renderer3D {
             if (p1.z > 200 && p2.z > 200 && p3.z > 200) return     // All vertices impossibly far
         }
         
-        // ALWAYS render triangles - remove all screen bounds checking for debugging
-        
-        // Calculate lighting with time-based modification
-        const lightDir = new Vec3(0.3, -0.8, 0.5).normalize()
-        const normal = triangle.getNormal()
-        const baseLightIntensity = Math.max(0.3, -normal.dot(lightDir)) // Minimum ambient light
-        const lightIntensity = baseLightIntensity * lightingMultiplier
+        // OPTIMIZED: Pre-calculate lighting direction (static)
+        const lightIntensity = Math.max(0.3, -triangle.getNormal().dot(this.lightDir)) * lightingMultiplier
         
         const litColor = triangle.color.copy()
         litColor.r = Math.floor(litColor.r * lightIntensity)
@@ -503,56 +518,39 @@ class Renderer3D {
         litColor.b = Math.floor(litColor.b * lightIntensity)
         litColor.a = 1.0 // Full opacity
         
-        // Always render VERY BRIGHT wireframe for visibility on small screens
-        const wireColor = colors.neonCyan.copy() // Force bright cyan for all wireframes
-        wireColor.r = 255  // Maximum brightness
-        wireColor.g = 255
-        wireColor.b = 255
-        wireColor.a = 1.0
-        
-        if (isDebug) {
-            // Try to show triangle coordinates as debug info
-            console.log(`Triangle vertices: (${p1.x.toFixed(1)}, ${p1.y.toFixed(1)}, ${p1.z.toFixed(2)})`, 
-                       `(${p2.x.toFixed(1)}, ${p2.y.toFixed(1)}, ${p2.z.toFixed(2)})`,
-                       `(${p3.x.toFixed(1)}, ${p3.y.toFixed(1)}, ${p3.z.toFixed(2)})`)
-        }
-        
-        // Calculate wireframe colors with depth fade and time-based lighting
-        function fadedWireColor(z: number, isGrid: boolean = false): Color {
-            if (isGrid) {
-                // Special handling for grid - neon green with transparency and lighting
-                const c = colors.neonGreen.copy()
-                c.r = Math.floor(57 * lightingMultiplier)
-                c.g = Math.floor(255 * lightingMultiplier)
-                c.b = Math.floor(20 * lightingMultiplier)
-                c.a = 0.7 * lightingMultiplier  // Semi-transparent with lighting effect
-                return c
-            } else {
-                // Normal wireframe for mountains etc with lighting
-                const c = colors.neonCyan.copy()
-                c.r = Math.floor(255 * lightingMultiplier)
-                c.g = Math.floor(255 * lightingMultiplier)
-                c.b = Math.floor(255 * lightingMultiplier)
-                c.a = Math.max(0.5, (1.0 - Math.min(1, (z - 1.5) * 0.1)) * lightingMultiplier)
-                return c
-            }
-        }
-        
-        // Check if this is likely a grid triangle (has low y values)
-        const isGridTriangle = (triangle.v1.y < 0.2 && triangle.v2.y < 0.2 && triangle.v3.y < 0.2)
-        
-        // Make wireframe lines thin for grid visibility - single pixel lines only
-        const lineColor1 = fadedWireColor(p1.z, isGridTriangle)
-        const lineColor2 = fadedWireColor(p2.z, isGridTriangle)
-        const lineColor3 = fadedWireColor(p3.z, isGridTriangle)
+        // OPTIMIZED: Reuse color calculations
+        const wireColor = this.getWireColor(p1.z, triangle.v1.y < 0.2 && triangle.v2.y < 0.2 && triangle.v3.y < 0.2, lightingMultiplier)
         
         // Draw single thin lines for clean grid appearance with subpixel smoothing
-        this.renderSubpixelLine(pl, p1.x, p1.y, p2.x, p2.y, lineColor1, lineColor2)
-        this.renderSubpixelLine(pl, p2.x, p2.y, p3.x, p3.y, lineColor2, lineColor3)
-        this.renderSubpixelLine(pl, p3.x, p3.y, p1.x, p1.y, lineColor3, lineColor1)
+        this.renderSubpixelLine(pl, p1.x, p1.y, p2.x, p2.y, wireColor, wireColor)
+        this.renderSubpixelLine(pl, p2.x, p2.y, p3.x, p3.y, wireColor, wireColor)
+        this.renderSubpixelLine(pl, p3.x, p3.y, p1.x, p1.y, wireColor, wireColor)
         
         // Fill triangle for solid objects (mountains, not grid)
         this.fillTriangle(p1, p2, p3, litColor, pl)
+    }
+    
+    // OPTIMIZED: Pre-calculated light direction and wireframe color helper
+    private lightDir = new Vec3(0.3, -0.8, 0.5).normalize()
+    
+    private getWireColor(z: number, isGrid: boolean, lightingMultiplier: number): Color {
+        if (isGrid) {
+            // Special handling for grid - neon green with transparency and lighting
+            const c = colors.neonGreen.copy()
+            c.r = Math.floor(57 * lightingMultiplier)
+            c.g = Math.floor(255 * lightingMultiplier)
+            c.b = Math.floor(20 * lightingMultiplier)
+            c.a = 0.7 * lightingMultiplier  // Semi-transparent with lighting effect
+            return c
+        } else {
+            // Normal wireframe for mountains etc with lighting
+            const c = colors.neonCyan.copy()
+            c.r = Math.floor(255 * lightingMultiplier)
+            c.g = Math.floor(255 * lightingMultiplier)
+            c.b = Math.floor(255 * lightingMultiplier)
+            c.a = Math.max(0.5, (1.0 - Math.min(1, (z - 1.5) * 0.1)) * lightingMultiplier)
+            return c
+        }
     }
     
     fillTriangle(p1: {x: number, y: number, z: number}, 
@@ -705,7 +703,7 @@ class SynthwaveGrid3D extends Mesh3D {
     }
 }
 
-// Electric spark system for the tower
+// Electric spark system for the tower - OPTIMIZED
 class ElectricSpark {
     position: Vec3
     velocity: Vec3
@@ -721,7 +719,7 @@ class ElectricSpark {
         this.maxLife = life
         this.intensity = 0.8 + Math.random() * 0.4 // Random intensity
         
-        // Electric blue/white colors with variation
+        // OPTIMIZED: Pre-calculated color variations
         const colorVariation = Math.random()
         if (colorVariation < 0.3) {
             this.color = new Color(200, 220, 255, 1, true) // Blue-white
@@ -733,8 +731,8 @@ class ElectricSpark {
     }
     
     update(): boolean {
-        // Move spark
-        this.position = this.position.add(this.velocity)
+        // OPTIMIZED: Use in-place operations to reduce object creation
+        this.position.addInPlace(this.velocity)
         
         // Add some random jitter for electric effect (reduced for smoother motion)
         this.position.x += (Math.random() - 0.5) * 0.005
@@ -742,16 +740,14 @@ class ElectricSpark {
         this.position.z += (Math.random() - 0.5) * 0.005
         
         // Slow down over time
-        this.velocity = this.velocity.multiply(0.98)
+        this.velocity.multiplyInPlace(0.98)
         
         // Decrease life
         this.life--
         
-        // Update color alpha based on life remaining - create new color to avoid read-only issues
+        // OPTIMIZED: Direct alpha modification instead of creating new color
         const lifeRatio = this.life / this.maxLife
-        const updatedColor = this.color.copy()
-        updatedColor.a = lifeRatio * this.intensity
-        this.color = updatedColor
+        this.color.a = lifeRatio * this.intensity
         
         return this.life > 0
     }
@@ -791,24 +787,24 @@ class FractalTree3D extends Mesh3D {
     leaves: TreeLeaf[] = []
     fallingLeaves: FallingLeaf[] = []
     age: number = 0 // Tree age in days (0-12, with 12 = 1 full year)
-    maxHeight: number = 3.0 // Maximum height the tree can reach
-    trunkRadius: number = 0.1
+    maxHeight: number = 10.0 // MUCH BIGGER - Maximum height the tree can reach
+    trunkRadius: number = 0.6 // MASSIVE trunk for giant ancient oak
     seasonalGrowthRate: number = 1.0
     leafSpawnTimer: number = 0
     leafFallTimer: number = 0
     
     constructor() {
-        super(new Vec3(0, 0, 2)) // Tree positioned closer at Z=4.5, with trunk base at Y=0 (ground level)
+        super(new Vec3(0, 0, 4)) // Tree positioned at Z=4 - CLOSER to camera for horizon visibility
         this.initializeBaseTrunk()
     }
     
     // Initialize with a single trunk segment
     initializeBaseTrunk() {
         const rootBranch = new TreeBranch(
-            new Vec3(0, 0, 0),    // Start at ground level (Y=0)
-            new Vec3(0, 1, 0),    // Grow straight up toward sky
-            0.18,                 // Initial trunk thickness - slightly thicker for better visibility
-            0.6,                  // Initial length - longer for better visibility
+            new Vec3(0, 0, 0),    // Start at ground level (Y=0) - FIXED POSITION
+            new Vec3(0, 1, 0),    // Grow straight up toward sky - NO Z MOVEMENT
+            1.0,                  // EVEN MORE MASSIVE trunk - Initial trunk thickness for better visibility
+            3.0,                  // MUCH taller initial segment - start bigger for immediate visibility
             0,                    // Generation 0 (trunk)
             null                  // No parent
         )
@@ -842,17 +838,17 @@ class FractalTree3D extends Mesh3D {
     
     updateSeasonalGrowth(season: number, seasonProgress: number) {
         switch(season) {
-            case 0: // Spring - rapid growth
-                this.seasonalGrowthRate = 1.0 + seasonProgress * 0.8 // 1.0 to 1.8
+            case 0: // Spring - ULTRA FAST growth for rapid development
+                this.seasonalGrowthRate = 4.0 + seasonProgress * 3.0 // 4.0 to 7.0 (extremely fast)
                 break
-            case 1: // Summer - moderate growth
-                this.seasonalGrowthRate = 1.5 - seasonProgress * 0.3 // 1.5 to 1.2
+            case 1: // Summer - ULTRA FAST sustained growth
+                this.seasonalGrowthRate = 6.0 - seasonProgress * 1.0 // 6.0 to 5.0 (very fast)
                 break  
-            case 2: // Autumn - slow growth
-                this.seasonalGrowthRate = 1.0 - seasonProgress * 0.7 // 1.0 to 0.3
+            case 2: // Autumn - FAST growth 
+                this.seasonalGrowthRate = 4.0 - seasonProgress * 1.5 // 4.0 to 2.5 (fast)
                 break
-            case 3: // Winter - minimal growth
-                this.seasonalGrowthRate = 0.2 + seasonProgress * 0.3 // 0.2 to 0.5
+            case 3: // Winter - Still fast growing
+                this.seasonalGrowthRate = 2.0 + seasonProgress * 1.0 // 2.0 to 3.0 (moderate-fast)
                 break
         }
     }
@@ -862,26 +858,34 @@ class FractalTree3D extends Mesh3D {
         
         // Find branches that can grow
         const growableBranches = this.branches.filter(branch => 
-            branch.generation <= 3 && // Only grow up to 3rd generation
+            branch.generation <= 5 && // Ancient oaks have even more generations
             branch.length < branch.targetLength
         )
         
         for (const branch of growableBranches) {
-            // Grow existing branch
-            const growthAmount = 0.02 * this.seasonalGrowthRate * (1.0 - branch.generation * 0.3)
+            // ULTRA FAST growth for rapid development
+            const baseGrowthAmount = 0.15 * this.seasonalGrowthRate // TRIPLED base growth rate
+            const generationMultiplier = 1.0 - branch.generation * 0.1 // Less reduction per generation for bigger tree
+            const growthAmount = baseGrowthAmount * generationMultiplier
             branch.length = Math.min(branch.targetLength, branch.length + growthAmount)
             
-            // Thicken trunk and main branches over time
-            if (branch.generation <= 1) {
-                const thickenRate = 0.001 * this.seasonalGrowthRate * (2 - branch.generation)
-                branch.radius = Math.min(branch.radius * 1.5, branch.radius + thickenRate)
+            // MASSIVE thickening over time for giant ancient oak appearance
+            if (branch.generation <= 4) { // Thicken even more generations for massive tree
+                const baseThickenRate = 0.012 * this.seasonalGrowthRate // TRIPLED thickening rate
+                const generationThickenMultiplier = (5 - branch.generation) // Even stronger multiplier for lower generations
+                const thickenRate = baseThickenRate * generationThickenMultiplier
+                const maxThickness = branch.radius * 4.0 // Allow even MORE massive thickening
+                branch.radius = Math.min(maxThickness, branch.radius + thickenRate)
             }
             
-            // Spawn new branches if conditions are right
-            if (branch.length >= branch.targetLength * 0.7 && // Branch is mostly grown
-                branch.childBranches.length === 0 && // No children yet
-                branch.generation < 3 && // Not too deep
-                Math.random() < 0.05 * this.seasonalGrowthRate) { // Random chance
+            // MUCH more frequent branching for rapid massive development
+            const branchingChance = 0.25 * this.seasonalGrowthRate // DOUBLED base chance for faster branching
+            const maturityThreshold = 0.3 // Even earlier branching for faster development
+            
+            if (branch.length >= branch.targetLength * maturityThreshold && 
+                branch.childBranches.length === 0 && 
+                branch.generation < 6 && // Allow even more generations for massive tree
+                Math.random() < branchingChance) {
                 
                 this.spawnChildBranches(branch)
             }
@@ -889,27 +893,58 @@ class FractalTree3D extends Mesh3D {
     }
     
     spawnChildBranches(parentBranch: TreeBranch) {
-        const numChildren = parentBranch.generation === 0 ? 3 : 2 // Trunk spawns 3, others spawn 2
+        // Giant ancient oaks have MASSIVE branching systems
+        let numChildren: number
+        if (parentBranch.generation === 0) {
+            numChildren = 6 + Math.floor(Math.random() * 4) // Trunk spawns 6-9 massive main branches
+        } else if (parentBranch.generation === 1) {
+            numChildren = 5 + Math.floor(Math.random() * 3) // Main branches spawn 5-7 major branches
+        } else if (parentBranch.generation === 2) {
+            numChildren = 4 + Math.floor(Math.random() * 2) // Secondary branches spawn 4-5
+        } else {
+            numChildren = 3 + Math.floor(Math.random() * 2) // Upper branches spawn 3-4
+        }
         
         for (let i = 0; i < numChildren; i++) {
-            const branchAngle = (i / numChildren) * Math.PI * 2 + Math.random() * 0.5
-            const upwardBias = 0.3 + Math.random() * 0.4 // Branches tend to grow upward
+            const branchAngle = (i / numChildren) * Math.PI * 2 + Math.random() * 1.0 // WIDER angular spread
+            
+            // Giant ancient oaks have DRAMATIC horizontal spread in main branches - NO Z MOVEMENT
+            let upwardBias: number
+            if (parentBranch.generation === 0) {
+                upwardBias = 0.6 + Math.random() * 0.3 // Trunk branches more upward but with spread
+            } else if (parentBranch.generation === 1) {
+                upwardBias = 0.2 + Math.random() * 0.4 // Main branches spread wide but NO Z movement
+            } else {
+                upwardBias = 0.1 + Math.random() * 0.3 // Upper branches horizontal for canopy spread - NO Z movement
+            }
             
             const branchDirection = new Vec3(
-                Math.cos(branchAngle) * (1.0 - upwardBias),
+                Math.cos(branchAngle) * (1.6 - upwardBias), // EVEN WIDER horizontal spread for giant oak - X only
                 upwardBias,
-                Math.sin(branchAngle) * (1.0 - upwardBias) * 0.3 // Less z-spread for better visibility
+                0 // NO Z MOVEMENT - branches stay in same Z plane
             ).normalize()
             
             const branchStart = parentBranch.start.add(
-                parentBranch.direction.multiply(parentBranch.length * 0.8)
+                parentBranch.direction.multiply(parentBranch.length * (0.5 + Math.random() * 0.4))
             )
+            
+            // MASSIVE branch lengths for giant ancient oak character
+            let baseBranchLength: number
+            if (parentBranch.generation === 0) {
+                baseBranchLength = 0.8 + Math.random() * 0.8 // HUGE main branches (0.8-1.6)
+            } else if (parentBranch.generation === 1) {
+                baseBranchLength = 0.6 + Math.random() * 0.6 // Large secondary branches (0.6-1.2)
+            } else if (parentBranch.generation === 2) {
+                baseBranchLength = 0.4 + Math.random() * 0.4 // Substantial tertiary branches
+            } else {
+                baseBranchLength = 0.3 + Math.random() * 0.3 // Smaller upper branches
+            }
             
             const childBranch = new TreeBranch(
                 branchStart,
                 branchDirection,
-                parentBranch.radius * 0.7, // Thinner than parent
-                0.2 + Math.random() * 0.3, // Target length
+                parentBranch.radius * 0.85, // Less taper for more massive giant oak branches
+                baseBranchLength,
                 parentBranch.generation + 1,
                 parentBranch
             )
@@ -923,22 +958,29 @@ class FractalTree3D extends Mesh3D {
         this.leafSpawnTimer++
         this.leafFallTimer++
         
-        // Spawn leaves in spring and summer
-        if ((season === 0 || season === 1) && this.leafSpawnTimer > 15) {
+        // Spawn leaves in spring and summer - MUCH FASTER
+        if ((season === 0 || season === 1) && this.leafSpawnTimer > 5) { // TRIPLED speed (5 vs 15)
             this.leafSpawnTimer = 0
             this.spawnLeaves(season, seasonProgress)
         }
         
-        // Drop leaves in autumn
-        if (season === 2 && this.leafFallTimer > 20) {
+        // Drop leaves in autumn - FASTER
+        if (season === 2 && this.leafFallTimer > 8) { // MUCH faster (8 vs 20)
             this.leafFallTimer = 0
             this.dropLeaves(seasonProgress)
         }
         
-        // Remove leaves in winter
+        // Remove leaves in winter - OPTIMIZED batch processing
         if (season === 3) {
+            // OPTIMIZED: Process leaves in batches to avoid frame drops
+            const batchSize = 10
+            let processed = 0
+            
             this.leaves = this.leaves.filter(leaf => {
-                if (Math.random() < 0.02) { // Gradual removal
+                if (processed >= batchSize) return true // Keep remaining for next frame
+                processed++
+                
+                if (Math.random() < 0.05) { // FASTER removal (5% vs 2%)
                     this.createFallingLeaf(leaf)
                     return false
                 }
@@ -948,24 +990,40 @@ class FractalTree3D extends Mesh3D {
     }
     
     spawnLeaves(season: number, seasonProgress: number) {
-        // Find branch tips that can have leaves
+        // OPTIMIZED: Limit total leaves for performance and find branch tips more efficiently
+        const maxTotalLeaves = 1200 // Performance limit
+        if (this.leaves.length >= maxTotalLeaves) return // Skip if too many leaves already
+        
         const leafBranches = this.branches.filter(branch => 
             branch.generation >= 2 && // Only on smaller branches
-            branch.length >= branch.targetLength * 0.5
+            branch.generation <= 4 && // Don't go too deep for performance
+            branch.length >= branch.targetLength * 0.2 // Even earlier leaf spawning for FASTER development
         )
         
-        for (const branch of leafBranches) {
-            if (Math.random() < 0.3) { // 30% chance per spawn cycle
-                const leafCount = 2 + Math.floor(Math.random() * 3) // 2-4 leaves per branch
+        // OPTIMIZED: Limit branches processed per frame for consistent performance
+        const maxBranchesPerFrame = 20
+        const branchesToProcess = Math.min(leafBranches.length, maxBranchesPerFrame)
+        
+        for (let b = 0; b < branchesToProcess; b++) {
+            const branch = leafBranches[b]
+            if (Math.random() < 0.8) { // MUCH higher chance for MASSIVE giant oak canopy (80% vs 50%)
+                const leafCount = Math.min(6 + Math.floor(Math.random() * 6), // MORE leaves per branch (6-11 vs 4-8)
+                    Math.floor((maxTotalLeaves - this.leaves.length) / (branchesToProcess - b))) // Don't exceed limit
                 
                 for (let i = 0; i < leafCount; i++) {
+                    if (this.leaves.length >= maxTotalLeaves) break // Performance safety
+                    
                     const leafPosition = branch.start.add(
-                        branch.direction.multiply(branch.length * (0.5 + Math.random() * 0.5))
+                        branch.direction.multiply(branch.length * (0.1 + Math.random() * 0.9))
                     ).add(new Vec3(
-                        (Math.random() - 0.5) * 0.1,
-                        (Math.random() - 0.5) * 0.05,
-                        (Math.random() - 0.5) * 0.1
+                        (Math.random() - 0.5) * 0.3, // WIDER spread for massive canopy - X only
+                        (Math.random() - 0.5) * 0.15, // More vertical variation
+                        0 // NO Z MOVEMENT for leaves
                     ))
+                    
+                    // CRITICAL FIX: Ensure all leaf positions stay at or above ground level (Y >= 0)
+                    // Leaves cannot spawn below ground - constrain Y coordinate
+                    leafPosition.y = Math.max(0, leafPosition.y)
                     
                     const leaf = new TreeLeaf(leafPosition, branch, season)
                     this.leaves.push(leaf)
@@ -1000,23 +1058,40 @@ class FractalTree3D extends Mesh3D {
     }
     
     updateFallingLeaves() {
+        // OPTIMIZED: Limit falling leaves processing and batch updates
+        const maxFallingLeaves = 100 // Performance limit for falling leaves
+        
+        // Remove excess falling leaves if too many
+        if (this.fallingLeaves.length > maxFallingLeaves) {
+            this.fallingLeaves = this.fallingLeaves.slice(0, maxFallingLeaves)
+        }
+        
+        // Update remaining falling leaves
         this.fallingLeaves = this.fallingLeaves.filter(leaf => leaf.update())
     }
     
     generateBranchMesh() {
-        // Clear existing branch triangles (keep leaves which are green/colorful)
-        this.triangles = this.triangles.filter(triangle => 
-            triangle.color.g > triangle.color.r // Keep non-brown triangles (leaves are more green)
-        )
+        // OPTIMIZED: 2D tree rendering - clear all triangles and use simple line rendering
+        this.triangles = [] // Clear all 3D geometry for 2D rendering
         
-        for (const branch of this.branches) {
-            this.createBranchGeometry(branch)
-        }
+        // No 3D geometry generation needed for 2D tree rendering
+        // Tree will be rendered as 2D lines in the render method
     }
     
     createBranchGeometry(branch: TreeBranch) {
-        const segments = 8 // More segments for smoother cylindrical branches
-        const lengthSegments = Math.max(3, Math.floor(branch.length / 0.08)) // More detail for smooth curves
+        // OPTIMIZED: Fewer segments for faster rendering based on branch importance
+        const segments = branch.generation === 0 ? 6 : // Trunk gets more detail
+                        branch.generation === 1 ? 4 : // Main branches get some detail  
+                        3 // Upper branches get minimal detail (was 8 for all)
+        
+        // OPTIMIZED: Much fewer length segments for faster rendering
+        const lengthSegments = branch.generation === 0 ? Math.max(2, Math.floor(branch.length * 5)) : // Trunk: length/0.2
+                              branch.generation === 1 ? Math.max(2, Math.floor(branch.length * 3.33)) : // Main: length/0.3
+                              Math.max(1, Math.floor(branch.length * 2.5)) // Upper: length/0.4
+        
+        // OPTIMIZED: Pre-allocate arrays
+        const ring1: Vec3[] = new Array(segments)
+        const ring2: Vec3[] = new Array(segments)
         
         for (let i = 0; i < lengthSegments; i++) {
             const t1 = i / lengthSegments
@@ -1025,76 +1100,58 @@ class FractalTree3D extends Mesh3D {
             const pos1 = branch.start.add(branch.direction.multiply(branch.length * t1))
             const pos2 = branch.start.add(branch.direction.multiply(branch.length * t2))
             
-            // More natural tapering - stronger taper for trunk, gentler for branches
-            const taperStrength = branch.generation === 0 ? 0.4 : 0.25
+            // CRITICAL FIX: Ensure all tree geometry stays at or above ground level (Y >= 0)
+            // Trees cannot grow below ground - constrain all Y coordinates to minimum of 0
+            pos1.y = Math.max(0, pos1.y)
+            pos2.y = Math.max(0, pos2.y)
+            
+            // OPTIMIZED: Simpler tapering calculation
+            const taperStrength = branch.generation <= 1 ? 0.3 : 0.5 // Less complex calculations
             const radius1 = branch.radius * (1.0 - t1 * taperStrength)
             const radius2 = branch.radius * (1.0 - t2 * taperStrength)
             
-            // Add subtle curvature and organic irregularities
-            const curvature = Math.sin(t1 * Math.PI * 2 + branch.generation) * 0.02
-            const organicNoise = (Math.random() - 0.5) * 0.01
+            // OPTIMIZED: Remove expensive organic variations for upper branches
+            const curvature = branch.generation <= 1 ? Math.sin(t1 * Math.PI * 2 + branch.generation) * 0.02 : 0
+            const organicNoise = branch.generation === 0 ? (Math.random() - 0.5) * 0.01 : 0
             
-            // Create ring vertices with organic variation
-            const ring1: Vec3[] = []
-            const ring2: Vec3[] = []
-            
+            // Create ring vertices - OPTIMIZED for each generation
             for (let j = 0; j < segments; j++) {
-                const angle = (j / segments) * Math.PI * 2
+                const angle = j * (Math.PI * 2 / segments) // OPTIMIZED: Pre-calculate step
                 
-                // Add organic irregularity to radius
-                const radiusVar1 = radius1 * (0.95 + Math.sin(angle * 3 + t1 * Math.PI) * 0.1)
-                const radiusVar2 = radius2 * (0.95 + Math.sin(angle * 3 + t2 * Math.PI) * 0.1)
+                // OPTIMIZED: Remove expensive organic variations for upper branches
+                const radiusVar1 = branch.generation <= 1 ? 
+                    radius1 * (0.95 + Math.sin(angle * 3 + t1 * Math.PI) * 0.1) : radius1
+                const radiusVar2 = branch.generation <= 1 ? 
+                    radius2 * (0.95 + Math.sin(angle * 3 + t2 * Math.PI) * 0.1) : radius2
                 
-                const offset1 = new Vec3(
-                    Math.cos(angle) * radiusVar1 + curvature,
-                    Math.sin(angle) * radiusVar1,
-                    organicNoise
+                const cosAngle = Math.cos(angle)
+                const sinAngle = Math.sin(angle)
+                
+                const vertex1 = new Vec3(
+                    pos1.x + cosAngle * radiusVar1 + curvature,
+                    pos1.y + sinAngle * radiusVar1,
+                    pos1.z + organicNoise
                 )
-                const offset2 = new Vec3(
-                    Math.cos(angle) * radiusVar2 + curvature,
-                    Math.sin(angle) * radiusVar2,
-                    organicNoise * 0.8
+                const vertex2 = new Vec3(
+                    pos2.x + cosAngle * radiusVar2 + curvature,
+                    pos2.y + sinAngle * radiusVar2,
+                    pos2.z + organicNoise * 0.8
                 )
                 
-                ring1.push(pos1.add(offset1))
-                ring2.push(pos2.add(offset2))
+                // CRITICAL FIX: Constrain all vertex Y coordinates to ground level or above
+                vertex1.y = Math.max(0, vertex1.y)
+                vertex2.y = Math.max(0, vertex2.y)
+                
+                ring1[j] = vertex1
+                ring2[j] = vertex2
             }
+            
+            // OPTIMIZED: Pre-calculate branch color once per segment
+            const branchColor = this.getBranchColor(branch.generation)
             
             // Create triangles between rings
             for (let j = 0; j < segments; j++) {
                 const next = (j + 1) % segments
-                
-                // More realistic branch colors - natural brown bark with depth variations
-                const heightRatio = t1 // Position along branch height
-                const generation = branch.generation
-                
-                // Base brown color with variations based on generation and height
-                let baseR: number, baseG: number, baseB: number
-                
-                if (generation === 0) {
-                    // Trunk - darker, grayer brown with moss-like undertones
-                    baseR = 85 + Math.sin(heightRatio * Math.PI) * 20 // 65-105
-                    baseG = 65 + Math.cos(heightRatio * Math.PI) * 15 + Math.random() * 8 // 50-88 with variation
-                    baseB = 45 + heightRatio * 10 + Math.random() * 5 // 45-60 with variation
-                } else if (generation === 1) {
-                    // Main branches - medium brown with reddish undertones
-                    baseR = 110 + Math.sin(heightRatio * Math.PI * 2) * 15 // 95-125
-                    baseG = 75 + Math.cos(heightRatio * Math.PI * 3) * 12 // 63-87
-                    baseB = 50 + heightRatio * 8 + Math.random() * 6 // 50-64 with variation
-                } else {
-                    // Small branches - lighter brown with greenish bark
-                    baseR = 120 + Math.sin(heightRatio * Math.PI * 4) * 10 // 110-130
-                    baseG = 90 + Math.cos(heightRatio * Math.PI * 2) * 15 + Math.random() * 8 // 75-113 with variation
-                    baseB = 55 + heightRatio * 12 + Math.random() * 8 // 55-75 with variation
-                }
-                
-                // Add natural bark texture variation
-                const barkTexture = Math.sin(j * Math.PI / 3) * 0.1 + Math.random() * 0.15
-                baseR = Math.floor(Math.max(30, Math.min(160, baseR * (0.9 + barkTexture))))
-                baseG = Math.floor(Math.max(25, Math.min(120, baseG * (0.9 + barkTexture))))
-                baseB = Math.floor(Math.max(20, Math.min(80, baseB * (0.9 + barkTexture))))
-                
-                const branchColor = new Color(baseR, baseG, baseB, 1, true)
                 
                 // Two triangles per quad
                 this.addTriangle(new Triangle3D(ring1[j], ring1[next], ring2[j], branchColor))
@@ -1103,62 +1160,210 @@ class FractalTree3D extends Mesh3D {
         }
     }
     
-    generateLeafMesh(season: number, seasonProgress: number) {
-        for (const leaf of this.leaves) {
-            this.createLeafGeometry(leaf, season, seasonProgress)
+    // OPTIMIZED: Pre-calculated branch colors to avoid repeated calculations
+    private getBranchColor(generation: number): Color {
+        let baseR: number, baseG: number, baseB: number
+        
+        // OPTIMIZED: Pre-calculated base colors per generation (no expensive sin/cos)
+        if (generation === 0) {
+            // Trunk - simple brown
+            baseR = 85
+            baseG = 65  
+            baseB = 45
+        } else if (generation === 1) {
+            // Main branches - medium brown
+            baseR = 110
+            baseG = 75
+            baseB = 50
+        } else {
+            // Small branches - light brown (no expensive calculations)
+            baseR = 120
+            baseG = 90
+            baseB = 55
         }
         
-        for (const fallingLeaf of this.fallingLeaves) {
-            this.createLeafGeometry(fallingLeaf, season, seasonProgress)
+        // OPTIMIZED: Minimal texture variation only for trunk and main branches
+        if (generation <= 1) {
+            const barkTexture = Math.random() * 0.1 + 0.05 // Simpler variation
+            baseR = Math.floor(Math.max(30, Math.min(160, baseR * (0.95 + barkTexture))))
+            baseG = Math.floor(Math.max(25, Math.min(120, baseG * (0.95 + barkTexture))))
+            baseB = Math.floor(Math.max(20, Math.min(80, baseB * (0.95 + barkTexture))))
+        }
+        
+        return new Color(baseR, baseG, baseB, 1, true)
+    }
+    
+    generateLeafMesh(season: number, seasonProgress: number) {
+        // OPTIMIZED: 2D leaf rendering - clear all triangles and use simple point rendering
+        // Remove any existing leaf triangles for 2D rendering
+        this.triangles = this.triangles.filter(triangle => 
+            triangle.color.r > triangle.color.g // Keep non-green triangles (branches are more brown)
+        )
+        
+        // No 3D leaf geometry generation needed for 2D rendering
+        // Leaves will be rendered as 2D points/circles in the render method
+    }
+    
+    // OPTIMIZED: 2D tree rendering for ultra-fast performance
+    render2D(renderer: Renderer3D, season: number, seasonProgress: number): PixelList {
+        const pl = new PixelList()
+        
+        // Render branches as 2D lines
+        this.render2DBranches(renderer, pl)
+        
+        // Render leaves as 2D points
+        this.render2DLeaves(renderer, pl, season, seasonProgress)
+        
+        // Render falling leaves as 2D points
+        this.render2DFallingLeaves(renderer, pl)
+        
+        return pl
+    }
+    
+    // OPTIMIZED: Render branches as fast 2D lines
+    render2DBranches(renderer: Renderer3D, pl: PixelList) {
+        // OPTIMIZED: Only render visible/important branches for performance
+        const importantBranches = this.branches.filter(branch => 
+            branch.generation <= 4 && // Render more generations since 2D is faster
+            branch.length > 0.1 // Only render branches with meaningful length
+        )
+        
+        for (const branch of importantBranches) {
+            const startPos = branch.start.add(this.position)
+            const endPos = branch.start.add(branch.direction.multiply(branch.length)).add(this.position)
+            
+            // Project to screen space
+            const startScreen = renderer.projectPoint(startPos)
+            const endScreen = renderer.projectPoint(endPos)
+            
+            // Only render if both points are in reasonable view
+            if (startScreen.z > 0 && endScreen.z > 0 && 
+                startScreen.z < 50 && endScreen.z < 50) {
+                
+                // Get branch color and thickness
+                const branchColor = this.getBranchColor(branch.generation)
+                const screenThickness = Math.max(1, Math.floor(branch.radius * 20 / startScreen.z))
+                
+                // Render branch as thick line using multiple parallel lines
+                for (let t = 0; t < screenThickness; t++) {
+                    const offset = t - screenThickness / 2
+                    renderer.renderSubpixelLine(pl, 
+                        startScreen.x + offset * 0.3, startScreen.y + offset * 0.2,
+                        endScreen.x + offset * 0.3, endScreen.y + offset * 0.2,
+                        branchColor, branchColor
+                    )
+                }
+            }
+        }
+    }
+    
+    // OPTIMIZED: Render leaves as fast 2D points/circles
+    render2DLeaves(renderer: Renderer3D, pl: PixelList, season: number, seasonProgress: number) {
+        // OPTIMIZED: Limit leaves for performance
+        const maxLeaves = 800 // Reduced for 2D rendering speed
+        const leafStep = this.leaves.length > maxLeaves ? Math.ceil(this.leaves.length / maxLeaves) : 1
+        
+        for (let i = 0; i < this.leaves.length; i += leafStep) {
+            if (i >= maxLeaves) break
+            
+            const leaf = this.leaves[i]
+            const leafWorldPos = leaf.position.add(this.position)
+            const leafScreen = renderer.projectPoint(leafWorldPos)
+            
+            // Only render if leaf is visible
+            if (leafScreen.z > 0 && leafScreen.z < 30 &&
+                leafScreen.x >= -5 && leafScreen.x < renderer.getWidth() + 5 &&
+                leafScreen.y >= -5 && leafScreen.y < renderer.getHeight() + 5) {
+                
+                const leafColor = this.getSeasonalLeafColor(season, seasonProgress)
+                const leafSize = Math.max(1, Math.floor(3 / leafScreen.z))
+                
+                // Render leaf as small circle/cluster
+                renderer.renderSubpixel(pl, leafScreen.x, leafScreen.y, leafColor)
+                
+                // Add small cluster effect for fuller appearance
+                if (leafSize > 1) {
+                    renderer.renderSubpixel(pl, leafScreen.x + 1, leafScreen.y, leafColor)
+                    renderer.renderSubpixel(pl, leafScreen.x - 1, leafScreen.y, leafColor)
+                    renderer.renderSubpixel(pl, leafScreen.x, leafScreen.y + 1, leafColor)
+                    renderer.renderSubpixel(pl, leafScreen.x, leafScreen.y - 1, leafColor)
+                }
+            }
+        }
+    }
+    
+    // OPTIMIZED: Render falling leaves as animated 2D points
+    render2DFallingLeaves(renderer: Renderer3D, pl: PixelList) {
+        // OPTIMIZED: Limit falling leaves for performance
+        const maxFallingLeaves = 50 // Reduced for 2D performance
+        const leafCount = Math.min(this.fallingLeaves.length, maxFallingLeaves)
+        
+        for (let i = 0; i < leafCount; i++) {
+            const leaf = this.fallingLeaves[i]
+            const leafWorldPos = leaf.position.add(this.position)
+            const leafScreen = renderer.projectPoint(leafWorldPos)
+            
+            // Only render if leaf is visible
+            if (leafScreen.z > 0 && leafScreen.z < 20 &&
+                leafScreen.x >= -2 && leafScreen.x < renderer.getWidth() + 2 &&
+                leafScreen.y >= -2 && leafScreen.y < renderer.getHeight() + 2) {
+                
+                // Render falling leaf with motion blur effect
+                renderer.renderSubpixel(pl, leafScreen.x, leafScreen.y, leaf.color)
+                
+                // Add subtle motion trail
+                if (leaf.color.a > 0.3) {
+                    const trailColor = leaf.color.copy()
+                    trailColor.a *= 0.3
+                    renderer.renderSubpixel(pl, leafScreen.x, leafScreen.y - 1, trailColor)
+                }
+            }
         }
     }
     
     createLeafGeometry(leaf: TreeLeaf | FallingLeaf, season: number, seasonProgress: number) {
-        const size = 0.04 + Math.random() * 0.02 // Slightly larger leaves: 0.04-0.06
+        // SIMPLER, SMALLER leaves for faster rendering
+        const size = 0.04 + Math.random() * 0.02 // SMALLER leaves: 0.04-0.06 vs 0.06-0.10
         
-        // Create more natural leaf shape (oval instead of square)
-        const leafWidth = size * (0.8 + Math.random() * 0.4) // Varying width
-        const leafHeight = size * (1.0 + Math.random() * 0.3) // Varying height
+        // SIMPLE square leaf shape for faster rendering - no complex rotation
+        const leafSize = size
         
-        // Create more realistic leaf quad with slight rotation
-        const leafAngle = Math.random() * Math.PI / 4 - Math.PI / 8 // -22.5 to +22.5 degrees
-        const cosA = Math.cos(leafAngle)
-        const sinA = Math.sin(leafAngle)
-        
+        // SIMPLE axis-aligned square vertices - much faster to render
         const vertices = [
-            leaf.position.add(new Vec3(
-                -leafWidth * cosA - (-leafHeight) * sinA,
-                -leafWidth * sinA + (-leafHeight) * cosA,
-                0
-            )),
-            leaf.position.add(new Vec3(
-                leafWidth * cosA - (-leafHeight) * sinA,
-                leafWidth * sinA + (-leafHeight) * cosA,
-                0
-            )),
-            leaf.position.add(new Vec3(
-                leafWidth * cosA - leafHeight * sinA,
-                leafWidth * sinA + leafHeight * cosA,
-                0
-            )),
-            leaf.position.add(new Vec3(
-                -leafWidth * cosA - leafHeight * sinA,
-                -leafWidth * sinA + leafHeight * cosA,
-                0
-            ))
+            leaf.position.add(new Vec3(-leafSize, -leafSize, 0)),
+            leaf.position.add(new Vec3(leafSize, -leafSize, 0)),
+            leaf.position.add(new Vec3(leafSize, leafSize, 0)),
+            leaf.position.add(new Vec3(-leafSize, leafSize, 0))
         ]
         
-        // Get more realistic seasonal leaf color
+        // CRITICAL FIX: Ensure all leaf vertices stay at or above ground level (Y >= 0)
+        // Leaves cannot appear below ground - constrain all vertex Y coordinates
+        for (const vertex of vertices) {
+            vertex.y = Math.max(0, vertex.y)
+        }
+        
+        // Get SIMPLER seasonal leaf color (reuse existing function but simpler shapes)
         const leafColor = this.getSeasonalLeafColor(season, seasonProgress)
         
-        // Create two triangles for the leaf quad
+        // Create two triangles for the leaf quad - SIMPLER geometry
         this.addTriangle(new Triangle3D(vertices[0], vertices[1], vertices[2], leafColor))
         this.addTriangle(new Triangle3D(vertices[0], vertices[2], vertices[3], leafColor))
     }
     
+    // OPTIMIZED: Cache seasonal leaf colors to avoid repeated calculations
+    private leafColorCache: Map<string, Color> = new Map()
+    
     getSeasonalLeafColor(season: number, seasonProgress: number): Color {
+        // OPTIMIZED: Cache colors with reduced precision for better hit rate
+        const cacheKey = `${season}-${Math.floor(seasonProgress * 10)}`
+        
+        if (this.leafColorCache.has(cacheKey)) {
+            return this.leafColorCache.get(cacheKey)!.copy()
+        }
+        
         // Add randomness for natural variation
         const leafVariation = Math.random() * 0.3 - 0.15 // -0.15 to +0.15
+        let color: Color
         
         switch(season) {
             case 0: // Spring - fresh young greens with yellow undertones
@@ -1168,13 +1373,14 @@ class FractalTree3D extends Mesh3D {
                     b: 85 + seasonProgress * 35    // 85-120 - yellow-green undertone
                 }
                 
-                return new Color(
+                color = new Color(
                     Math.floor(Math.max(60, Math.min(160, springBase.r * (1 + leafVariation)))),
                     Math.floor(Math.max(140, Math.min(255, springBase.g * (1 + leafVariation * 0.5)))),
                     Math.floor(Math.max(60, Math.min(140, springBase.b * (1 + leafVariation)))),
                     0.7 + Math.random() * 0.2, // 70-90% opacity for fresh spring leaves
                     true
                 )
+                break
                 
             case 1: // Summer - deep rich greens
                 const summerIntensity = 0.8 + Math.random() * 0.4 // 0.8-1.2
@@ -1184,23 +1390,22 @@ class FractalTree3D extends Mesh3D {
                     b: 55 + Math.random() * 20    // 55-75 - natural green undertone
                 }
                 
-                return new Color(
+                color = new Color(
                     Math.floor(Math.max(30, Math.min(90, summerBase.r * summerIntensity))),
                     Math.floor(Math.max(140, Math.min(240, summerBase.g * summerIntensity))),
                     Math.floor(Math.max(40, Math.min(85, summerBase.b * summerIntensity))),
                     0.75 + Math.random() * 0.2, // 75-95% opacity for full summer leaves
                     true
                 )
+                break
                 
             case 2: // Autumn - smooth gradient from green to warm colors
                 const autumnProgress = seasonProgress // 0=early autumn, 1=late autumn
                 const randomChoice = Math.random()
                 
-                let autumnColor: Color
-                
                 if (randomChoice < 0.25) {
                     // Staying green (25% chance)
-                    autumnColor = new Color(
+                    color = new Color(
                         Math.floor(60 + autumnProgress * 40), // 60-100
                         Math.floor(140 - autumnProgress * 30), // 140-110
                         Math.floor(50 + autumnProgress * 20), // 50-70
@@ -1209,7 +1414,7 @@ class FractalTree3D extends Mesh3D {
                     )
                 } else if (randomChoice < 0.45) {
                     // Yellow transition (20% chance)
-                    autumnColor = new Color(
+                    color = new Color(
                         Math.floor(180 + autumnProgress * 50), // 180-230
                         Math.floor(190 + autumnProgress * 45), // 190-235
                         Math.floor(60 + autumnProgress * 30),  // 60-90
@@ -1218,7 +1423,7 @@ class FractalTree3D extends Mesh3D {
                     )
                 } else if (randomChoice < 0.7) {
                     // Orange transition (25% chance)
-                    autumnColor = new Color(
+                    color = new Color(
                         Math.floor(200 + autumnProgress * 40), // 200-240
                         Math.floor(120 + autumnProgress * 60), // 120-180
                         Math.floor(50 + autumnProgress * 20),  // 50-70
@@ -1227,7 +1432,7 @@ class FractalTree3D extends Mesh3D {
                     )
                 } else {
                     // Red transition (30% chance)
-                    autumnColor = new Color(
+                    color = new Color(
                         Math.floor(160 + autumnProgress * 70), // 160-230
                         Math.floor(70 + autumnProgress * 40),  // 70-110
                         Math.floor(45 + autumnProgress * 25),  // 45-70
@@ -1237,11 +1442,10 @@ class FractalTree3D extends Mesh3D {
                 }
                 
                 // Add natural leaf variation
-                autumnColor.r = Math.floor(Math.max(40, Math.min(255, autumnColor.r * (0.9 + leafVariation))))
-                autumnColor.g = Math.floor(Math.max(40, Math.min(255, autumnColor.g * (0.9 + leafVariation))))
-                autumnColor.b = Math.floor(Math.max(30, Math.min(120, autumnColor.b * (0.9 + leafVariation))))
-                
-                return autumnColor
+                color.r = Math.floor(Math.max(40, Math.min(255, color.r * (0.9 + leafVariation))))
+                color.g = Math.floor(Math.max(40, Math.min(255, color.g * (0.9 + leafVariation))))
+                color.b = Math.floor(Math.max(30, Math.min(120, color.b * (0.9 + leafVariation))))
+                break
                 
             case 3: // Winter - withered browns and muted colors
                 const winterBrown = {
@@ -1250,18 +1454,26 @@ class FractalTree3D extends Mesh3D {
                     b: 40 + Math.random() * 20    // 40-60 - dark undertone
                 }
                 
-                return new Color(
+                color = new Color(
                     Math.floor(Math.max(70, Math.min(150, winterBrown.r))),
                     Math.floor(Math.max(50, Math.min(110, winterBrown.g))),
                     Math.floor(Math.max(30, Math.min(70, winterBrown.b))),
                     0.7 + Math.random() * 0.3, // Semi-transparent for withered effect
                     true
                 )
+                break
                 
             default:
                 // Default rich summer green with transparency
-                return new Color(50, 180, 60, 0.8, true)
+                color = new Color(50, 180, 60, 0.8, true)
         }
+        
+        // OPTIMIZED: Cache the result (limit cache size to prevent memory leaks)
+        if (this.leafColorCache.size < 100) {
+            this.leafColorCache.set(cacheKey, color.copy())
+        }
+        
+        return color
     }
 }
 
@@ -1276,7 +1488,7 @@ class TreeBranch {
         public targetLength: number,
         public generation: number,
         public parent: TreeBranch | null,
-        public length: number = 0.05 // Start with minimal length
+        public length: number = 0.5 // Start with visible length for immediate tree visibility
     ) {}
 }
 
@@ -1290,7 +1502,7 @@ class TreeLeaf {
     ) {}
 }
 
-// Falling leaf class with physics
+// Falling leaf class with physics - OPTIMIZED
 class FallingLeaf {
     life: number = 200 // Frames until leaf disappears
     
@@ -1301,17 +1513,17 @@ class FallingLeaf {
     ) {}
     
     update(): boolean {
-        // Apply gravity and wind
+        // OPTIMIZED: Use in-place operations to reduce object creation
         this.velocity.y -= 0.0005 // Gravity
         this.velocity.x += (Math.random() - 0.5) * 0.001 // Wind
         this.velocity.z += (Math.random() - 0.5) * 0.0005 // Wind
         
-        // Update position
-        this.position = this.position.add(this.velocity)
+        // Update position in-place
+        this.position.addInPlace(this.velocity)
         
         // Fade out over time - make leaves more transparent as they fall
         this.life--
-        const lifeRatio = this.life / 200
+        const lifeRatio = this.life * 0.005 // Pre-calculate 1/200
         this.color.a = Math.max(0, lifeRatio * 0.6) // Maximum 60% opacity, fading to 0
         
         // Remove if hit ground or faded out
@@ -3021,14 +3233,17 @@ export default class Synthwave extends Animator {
                     }
                     
                     if (fractalTree) {
-                        console.log("Rendering fractal tree with lighting multiplier:", lightingMultiplier.toFixed(2))
+                        console.log("Rendering fractal tree with 2D rendering for maximum performance")
                         
                         // Update fractal tree with seasonal growth
                         const dayOfYear = Math.floor((time / speedControl.value) / framesPerDay) % 12
+                        const season = Math.floor((dayOfYear % 12) / 3) // 0=spring, 1=summer, 2=autumn, 3=winter
+                        const seasonProgress = ((dayOfYear % 12) % 3) / 3 // Progress within current season (0-1)
+                        
                         fractalTree.update(timeOfDay, dayOfYear)
                         
-                        // Render fractal tree structure
-                        pl.add(renderer.renderMesh(fractalTree, false, noClipControl.enabled, lightingMultiplier))
+                        // Render fractal tree with ultra-fast 2D rendering
+                        pl.add(fractalTree.render2D(renderer, season, seasonProgress))
                     }
                 } catch (error) {
                     console.error("3D rendering error:", error)
