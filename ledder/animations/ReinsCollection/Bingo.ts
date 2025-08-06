@@ -57,6 +57,7 @@ export class Bingo
     getLastNumber()
     {
         let numbersDoneCount=this.numbersDone.length
+        if (numbersDoneCount === 0) return "" // Return empty string if no numbers drawn
         return this.numbersDone[numbersDoneCount-1].toString()
     }
 

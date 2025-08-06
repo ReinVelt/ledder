@@ -58,7 +58,16 @@ const colors = {
     groundDark: new Color(10, 0, 20, 1, true),
     groundPurple: new Color(30, 10, 40, 1, true),
     grass: new Color(0, 120, 40, 1, true),
-    water: new Color(0, 100, 200, 0.8, true)
+    water: new Color(0, 100, 200, 0.8, true),
+    
+    // Tree colors
+    trunkBrown: new Color(85, 65, 45, 1, true),
+    branchBrown: new Color(110, 75, 50, 1, true),
+    springGreen: new Color(120, 200, 100, 1, true),
+    summerGreen: new Color(50, 180, 60, 1, true),
+    autumnRed: new Color(200, 80, 60, 1, true),
+    autumnOrange: new Color(220, 140, 65, 1, true),
+    autumnYellow: new Color(210, 200, 70, 1, true)
 }
 
 // 3D Vector class with full transformation support
@@ -738,9 +747,11 @@ class ElectricSpark {
         // Decrease life
         this.life--
         
-        // Update color alpha based on life remaining
+        // Update color alpha based on life remaining - create new color to avoid read-only issues
         const lifeRatio = this.life / this.maxLife
-        this.color.a = lifeRatio * this.intensity
+        const updatedColor = this.color.copy()
+        updatedColor.a = lifeRatio * this.intensity
+        this.color = updatedColor
         
         return this.life > 0
     }
@@ -774,135 +785,543 @@ class ElectricSpark {
     }
 }
 
-// 3D Tower system - replaces mountains with a red block tower
-class Tower3D extends Mesh3D {
-    sparks: ElectricSpark[] = []
-    sparkTimer: number = 0
+// 3D Fractal Tree system - grows over time with seasonal changes
+class FractalTree3D extends Mesh3D {
+    branches: TreeBranch[] = []
+    leaves: TreeLeaf[] = []
+    fallingLeaves: FallingLeaf[] = []
+    age: number = 0 // Tree age in days (0-12, with 12 = 1 full year)
+    maxHeight: number = 3.0 // Maximum height the tree can reach
+    trunkRadius: number = 0.1
+    seasonalGrowthRate: number = 1.0
+    leafSpawnTimer: number = 0
+    leafFallTimer: number = 0
     
     constructor() {
-        super(new Vec3(0, 0, 0))
-        this.generateTower()
+        super(new Vec3(0, 0, 2)) // Tree positioned closer at Z=4.5, with trunk base at Y=0 (ground level)
+        this.initializeBaseTrunk()
     }
-
-    generateTower() {
-        // Tower pattern for each face (8x8 grid)
-        // 'r' = red block, '0' = no block
-        // Pattern defined from BOTTOM (index 0) to TOP (index 7) for correct orientation
-        const pattern = [
-            "rrr00rrr",  // Bottom row (ground level)
-            "0rr00rr0",
-            "0rr00rr0",
-            "0rrrrrr0",
-            "0rrrrrr0",
-            "0rrrrrr0",
-            "rr0rr0rr", 
-            "rr0rr0rr"   // Top row
-        ]
+    
+    // Initialize with a single trunk segment
+    initializeBaseTrunk() {
+        const rootBranch = new TreeBranch(
+            new Vec3(0, 0, 0),    // Start at ground level (Y=0)
+            new Vec3(0, 1, 0),    // Grow straight up toward sky
+            0.18,                 // Initial trunk thickness - slightly thicker for better visibility
+            0.6,                  // Initial length - longer for better visibility
+            0,                    // Generation 0 (trunk)
+            null                  // No parent
+        )
+        this.branches.push(rootBranch)
+        this.generateBranchMesh()
+    }
+    
+    // Update tree based on time progression (12 days = 1 year, 4 days = 1 season)
+    update(timeOfDay: number, dayOfYear: number) {
+        // Calculate age and season
+        this.age = dayOfYear % 12 // Tree age cycles over 12 days
+        const season = Math.floor((dayOfYear % 12) / 3) // 0=spring, 1=summer, 2=autumn, 3=winter
+        const seasonProgress = ((dayOfYear % 12) % 3) / 3 // Progress within current season (0-1)
         
-        // Tower dimensions: 8x8x8 blocks
-        const towerSize = 8
-        const blockSize = 0.4  // Larger blocks for better visibility and stability
-        const towerZ = 7.0     // Tower closer to camera for better visibility and stability
+        // Update seasonal growth rate
+        this.updateSeasonalGrowth(season, seasonProgress)
         
-        // Red color for blocks
-        const blockColor = new Color(255, 80, 80, 1, true)  // Bright red
+        // Grow branches based on age and season
+        this.growBranches(season, seasonProgress)
         
-        // Generate blocks based on pattern
-        for (let y = 0; y < towerSize; y++) {
-            for (let x = 0; x < towerSize; x++) {
-                for (let z = 0; z < towerSize; z++) {
-                    // Check if this position should have a block
-                    let hasBlock = false
+        // Manage leaves based on season
+        this.manageLeaves(season, seasonProgress, timeOfDay)
+        
+        // Update falling leaves
+        this.updateFallingLeaves()
+        
+        // Regenerate mesh
+        this.generateBranchMesh()
+        this.generateLeafMesh(season, seasonProgress)
+    }
+    
+    updateSeasonalGrowth(season: number, seasonProgress: number) {
+        switch(season) {
+            case 0: // Spring - rapid growth
+                this.seasonalGrowthRate = 1.0 + seasonProgress * 0.8 // 1.0 to 1.8
+                break
+            case 1: // Summer - moderate growth
+                this.seasonalGrowthRate = 1.5 - seasonProgress * 0.3 // 1.5 to 1.2
+                break  
+            case 2: // Autumn - slow growth
+                this.seasonalGrowthRate = 1.0 - seasonProgress * 0.7 // 1.0 to 0.3
+                break
+            case 3: // Winter - minimal growth
+                this.seasonalGrowthRate = 0.2 + seasonProgress * 0.3 // 0.2 to 0.5
+                break
+        }
+    }
+    
+    growBranches(season: number, seasonProgress: number) {
+        const targetHeight = Math.min(this.maxHeight, (this.age / 12) * this.maxHeight)
+        
+        // Find branches that can grow
+        const growableBranches = this.branches.filter(branch => 
+            branch.generation <= 3 && // Only grow up to 3rd generation
+            branch.length < branch.targetLength
+        )
+        
+        for (const branch of growableBranches) {
+            // Grow existing branch
+            const growthAmount = 0.02 * this.seasonalGrowthRate * (1.0 - branch.generation * 0.3)
+            branch.length = Math.min(branch.targetLength, branch.length + growthAmount)
+            
+            // Thicken trunk and main branches over time
+            if (branch.generation <= 1) {
+                const thickenRate = 0.001 * this.seasonalGrowthRate * (2 - branch.generation)
+                branch.radius = Math.min(branch.radius * 1.5, branch.radius + thickenRate)
+            }
+            
+            // Spawn new branches if conditions are right
+            if (branch.length >= branch.targetLength * 0.7 && // Branch is mostly grown
+                branch.childBranches.length === 0 && // No children yet
+                branch.generation < 3 && // Not too deep
+                Math.random() < 0.05 * this.seasonalGrowthRate) { // Random chance
+                
+                this.spawnChildBranches(branch)
+            }
+        }
+    }
+    
+    spawnChildBranches(parentBranch: TreeBranch) {
+        const numChildren = parentBranch.generation === 0 ? 3 : 2 // Trunk spawns 3, others spawn 2
+        
+        for (let i = 0; i < numChildren; i++) {
+            const branchAngle = (i / numChildren) * Math.PI * 2 + Math.random() * 0.5
+            const upwardBias = 0.3 + Math.random() * 0.4 // Branches tend to grow upward
+            
+            const branchDirection = new Vec3(
+                Math.cos(branchAngle) * (1.0 - upwardBias),
+                upwardBias,
+                Math.sin(branchAngle) * (1.0 - upwardBias) * 0.3 // Less z-spread for better visibility
+            ).normalize()
+            
+            const branchStart = parentBranch.start.add(
+                parentBranch.direction.multiply(parentBranch.length * 0.8)
+            )
+            
+            const childBranch = new TreeBranch(
+                branchStart,
+                branchDirection,
+                parentBranch.radius * 0.7, // Thinner than parent
+                0.2 + Math.random() * 0.3, // Target length
+                parentBranch.generation + 1,
+                parentBranch
+            )
+            
+            this.branches.push(childBranch)
+            parentBranch.childBranches.push(childBranch)
+        }
+    }
+    
+    manageLeaves(season: number, seasonProgress: number, timeOfDay: number) {
+        this.leafSpawnTimer++
+        this.leafFallTimer++
+        
+        // Spawn leaves in spring and summer
+        if ((season === 0 || season === 1) && this.leafSpawnTimer > 15) {
+            this.leafSpawnTimer = 0
+            this.spawnLeaves(season, seasonProgress)
+        }
+        
+        // Drop leaves in autumn
+        if (season === 2 && this.leafFallTimer > 20) {
+            this.leafFallTimer = 0
+            this.dropLeaves(seasonProgress)
+        }
+        
+        // Remove leaves in winter
+        if (season === 3) {
+            this.leaves = this.leaves.filter(leaf => {
+                if (Math.random() < 0.02) { // Gradual removal
+                    this.createFallingLeaf(leaf)
+                    return false
+                }
+                return true
+            })
+        }
+    }
+    
+    spawnLeaves(season: number, seasonProgress: number) {
+        // Find branch tips that can have leaves
+        const leafBranches = this.branches.filter(branch => 
+            branch.generation >= 2 && // Only on smaller branches
+            branch.length >= branch.targetLength * 0.5
+        )
+        
+        for (const branch of leafBranches) {
+            if (Math.random() < 0.3) { // 30% chance per spawn cycle
+                const leafCount = 2 + Math.floor(Math.random() * 3) // 2-4 leaves per branch
+                
+                for (let i = 0; i < leafCount; i++) {
+                    const leafPosition = branch.start.add(
+                        branch.direction.multiply(branch.length * (0.5 + Math.random() * 0.5))
+                    ).add(new Vec3(
+                        (Math.random() - 0.5) * 0.1,
+                        (Math.random() - 0.5) * 0.05,
+                        (Math.random() - 0.5) * 0.1
+                    ))
                     
-                    // Only check front face (z = 0) to create a 2D panel effect
-                    if (z === 0 && pattern[y] && pattern[y][x] === 'r') hasBlock = true
-                    
-                    if (hasBlock) {
-                        this.createBlock(
-                            (x - towerSize/2) * blockSize,  // Center the tower horizontally
-                            y * blockSize,                  // Fixed: y=0 is bottom, y increases upward
-                            towerZ + (z - towerSize/2) * blockSize,
-                            blockSize,
-                            blockColor
-                        )
-                    }
+                    const leaf = new TreeLeaf(leafPosition, branch, season)
+                    this.leaves.push(leaf)
                 }
             }
         }
     }
     
-    createBlock(x: number, y: number, z: number, size: number, color: Color) {
-        const half = size / 2
+    dropLeaves(seasonProgress: number) {
+        const dropRate = seasonProgress * 0.1 // More drops as autumn progresses
         
-        // Define the 8 vertices of a cube
+        this.leaves = this.leaves.filter(leaf => {
+            if (Math.random() < dropRate) {
+                this.createFallingLeaf(leaf)
+                return false
+            }
+            return true
+        })
+    }
+    
+    createFallingLeaf(leaf: TreeLeaf) {
+        const fallingLeaf = new FallingLeaf(
+            leaf.position.copy(),
+            new Vec3(
+                (Math.random() - 0.5) * 0.02, // Random horizontal drift
+                -0.01 - Math.random() * 0.02,  // Downward motion
+                (Math.random() - 0.5) * 0.01   // Random z-drift
+            ),
+            leaf.color.copy()
+        )
+        this.fallingLeaves.push(fallingLeaf)
+    }
+    
+    updateFallingLeaves() {
+        this.fallingLeaves = this.fallingLeaves.filter(leaf => leaf.update())
+    }
+    
+    generateBranchMesh() {
+        // Clear existing branch triangles (keep leaves which are green/colorful)
+        this.triangles = this.triangles.filter(triangle => 
+            triangle.color.g > triangle.color.r // Keep non-brown triangles (leaves are more green)
+        )
+        
+        for (const branch of this.branches) {
+            this.createBranchGeometry(branch)
+        }
+    }
+    
+    createBranchGeometry(branch: TreeBranch) {
+        const segments = 8 // More segments for smoother cylindrical branches
+        const lengthSegments = Math.max(3, Math.floor(branch.length / 0.08)) // More detail for smooth curves
+        
+        for (let i = 0; i < lengthSegments; i++) {
+            const t1 = i / lengthSegments
+            const t2 = (i + 1) / lengthSegments
+            
+            const pos1 = branch.start.add(branch.direction.multiply(branch.length * t1))
+            const pos2 = branch.start.add(branch.direction.multiply(branch.length * t2))
+            
+            // More natural tapering - stronger taper for trunk, gentler for branches
+            const taperStrength = branch.generation === 0 ? 0.4 : 0.25
+            const radius1 = branch.radius * (1.0 - t1 * taperStrength)
+            const radius2 = branch.radius * (1.0 - t2 * taperStrength)
+            
+            // Add subtle curvature and organic irregularities
+            const curvature = Math.sin(t1 * Math.PI * 2 + branch.generation) * 0.02
+            const organicNoise = (Math.random() - 0.5) * 0.01
+            
+            // Create ring vertices with organic variation
+            const ring1: Vec3[] = []
+            const ring2: Vec3[] = []
+            
+            for (let j = 0; j < segments; j++) {
+                const angle = (j / segments) * Math.PI * 2
+                
+                // Add organic irregularity to radius
+                const radiusVar1 = radius1 * (0.95 + Math.sin(angle * 3 + t1 * Math.PI) * 0.1)
+                const radiusVar2 = radius2 * (0.95 + Math.sin(angle * 3 + t2 * Math.PI) * 0.1)
+                
+                const offset1 = new Vec3(
+                    Math.cos(angle) * radiusVar1 + curvature,
+                    Math.sin(angle) * radiusVar1,
+                    organicNoise
+                )
+                const offset2 = new Vec3(
+                    Math.cos(angle) * radiusVar2 + curvature,
+                    Math.sin(angle) * radiusVar2,
+                    organicNoise * 0.8
+                )
+                
+                ring1.push(pos1.add(offset1))
+                ring2.push(pos2.add(offset2))
+            }
+            
+            // Create triangles between rings
+            for (let j = 0; j < segments; j++) {
+                const next = (j + 1) % segments
+                
+                // More realistic branch colors - natural brown bark with depth variations
+                const heightRatio = t1 // Position along branch height
+                const generation = branch.generation
+                
+                // Base brown color with variations based on generation and height
+                let baseR: number, baseG: number, baseB: number
+                
+                if (generation === 0) {
+                    // Trunk - darker, grayer brown with moss-like undertones
+                    baseR = 85 + Math.sin(heightRatio * Math.PI) * 20 // 65-105
+                    baseG = 65 + Math.cos(heightRatio * Math.PI) * 15 + Math.random() * 8 // 50-88 with variation
+                    baseB = 45 + heightRatio * 10 + Math.random() * 5 // 45-60 with variation
+                } else if (generation === 1) {
+                    // Main branches - medium brown with reddish undertones
+                    baseR = 110 + Math.sin(heightRatio * Math.PI * 2) * 15 // 95-125
+                    baseG = 75 + Math.cos(heightRatio * Math.PI * 3) * 12 // 63-87
+                    baseB = 50 + heightRatio * 8 + Math.random() * 6 // 50-64 with variation
+                } else {
+                    // Small branches - lighter brown with greenish bark
+                    baseR = 120 + Math.sin(heightRatio * Math.PI * 4) * 10 // 110-130
+                    baseG = 90 + Math.cos(heightRatio * Math.PI * 2) * 15 + Math.random() * 8 // 75-113 with variation
+                    baseB = 55 + heightRatio * 12 + Math.random() * 8 // 55-75 with variation
+                }
+                
+                // Add natural bark texture variation
+                const barkTexture = Math.sin(j * Math.PI / 3) * 0.1 + Math.random() * 0.15
+                baseR = Math.floor(Math.max(30, Math.min(160, baseR * (0.9 + barkTexture))))
+                baseG = Math.floor(Math.max(25, Math.min(120, baseG * (0.9 + barkTexture))))
+                baseB = Math.floor(Math.max(20, Math.min(80, baseB * (0.9 + barkTexture))))
+                
+                const branchColor = new Color(baseR, baseG, baseB, 1, true)
+                
+                // Two triangles per quad
+                this.addTriangle(new Triangle3D(ring1[j], ring1[next], ring2[j], branchColor))
+                this.addTriangle(new Triangle3D(ring1[next], ring2[next], ring2[j], branchColor))
+            }
+        }
+    }
+    
+    generateLeafMesh(season: number, seasonProgress: number) {
+        for (const leaf of this.leaves) {
+            this.createLeafGeometry(leaf, season, seasonProgress)
+        }
+        
+        for (const fallingLeaf of this.fallingLeaves) {
+            this.createLeafGeometry(fallingLeaf, season, seasonProgress)
+        }
+    }
+    
+    createLeafGeometry(leaf: TreeLeaf | FallingLeaf, season: number, seasonProgress: number) {
+        const size = 0.04 + Math.random() * 0.02 // Slightly larger leaves: 0.04-0.06
+        
+        // Create more natural leaf shape (oval instead of square)
+        const leafWidth = size * (0.8 + Math.random() * 0.4) // Varying width
+        const leafHeight = size * (1.0 + Math.random() * 0.3) // Varying height
+        
+        // Create more realistic leaf quad with slight rotation
+        const leafAngle = Math.random() * Math.PI / 4 - Math.PI / 8 // -22.5 to +22.5 degrees
+        const cosA = Math.cos(leafAngle)
+        const sinA = Math.sin(leafAngle)
+        
         const vertices = [
-            new Vec3(x - half, y - half, z - half), // 0: bottom-left-front
-            new Vec3(x + half, y - half, z - half), // 1: bottom-right-front
-            new Vec3(x + half, y + half, z - half), // 2: top-right-front
-            new Vec3(x - half, y + half, z - half), // 3: top-left-front
-            new Vec3(x - half, y - half, z + half), // 4: bottom-left-back
-            new Vec3(x + half, y - half, z + half), // 5: bottom-right-back
-            new Vec3(x + half, y + half, z + half), // 6: top-right-back
-            new Vec3(x - half, y + half, z + half)  // 7: top-left-back
+            leaf.position.add(new Vec3(
+                -leafWidth * cosA - (-leafHeight) * sinA,
+                -leafWidth * sinA + (-leafHeight) * cosA,
+                0
+            )),
+            leaf.position.add(new Vec3(
+                leafWidth * cosA - (-leafHeight) * sinA,
+                leafWidth * sinA + (-leafHeight) * cosA,
+                0
+            )),
+            leaf.position.add(new Vec3(
+                leafWidth * cosA - leafHeight * sinA,
+                leafWidth * sinA + leafHeight * cosA,
+                0
+            )),
+            leaf.position.add(new Vec3(
+                -leafWidth * cosA - leafHeight * sinA,
+                -leafWidth * sinA + leafHeight * cosA,
+                0
+            ))
         ]
         
-        // Create different shades for different faces (lighting effect)
-        const frontColor = color.copy()
+        // Get more realistic seasonal leaf color
+        const leafColor = this.getSeasonalLeafColor(season, seasonProgress)
         
-        // Only create front face for 2D panel effect
-        // Front face triangles
-        this.addTriangle(new Triangle3D(vertices[0], vertices[1], vertices[2], frontColor))
-        this.addTriangle(new Triangle3D(vertices[0], vertices[2], vertices[3], frontColor))
+        // Create two triangles for the leaf quad
+        this.addTriangle(new Triangle3D(vertices[0], vertices[1], vertices[2], leafColor))
+        this.addTriangle(new Triangle3D(vertices[0], vertices[2], vertices[3], leafColor))
     }
     
-    updateSparks() {
-        // Update existing sparks
-        this.sparks = this.sparks.filter(spark => spark.update())
+    getSeasonalLeafColor(season: number, seasonProgress: number): Color {
+        // Add randomness for natural variation
+        const leafVariation = Math.random() * 0.3 - 0.15 // -0.15 to +0.15
         
-        // Spawn new sparks occasionally
-        this.sparkTimer++
-        if (this.sparkTimer > 30 + Math.random() * 60) { // Every 30-90 frames (1.5-4.5 seconds at 20fps)
-            this.sparkTimer = 0
-            this.spawnSpark()
+        switch(season) {
+            case 0: // Spring - fresh young greens with yellow undertones
+                const springBase = {
+                    r: 95 + seasonProgress * 40,   // 95-135 - soft fresh green
+                    g: 180 + seasonProgress * 50,  // 180-230 - vibrant spring green
+                    b: 85 + seasonProgress * 35    // 85-120 - yellow-green undertone
+                }
+                
+                return new Color(
+                    Math.floor(Math.max(60, Math.min(160, springBase.r * (1 + leafVariation)))),
+                    Math.floor(Math.max(140, Math.min(255, springBase.g * (1 + leafVariation * 0.5)))),
+                    Math.floor(Math.max(60, Math.min(140, springBase.b * (1 + leafVariation)))),
+                    0.7 + Math.random() * 0.2, // 70-90% opacity for fresh spring leaves
+                    true
+                )
+                
+            case 1: // Summer - deep rich greens
+                const summerIntensity = 0.8 + Math.random() * 0.4 // 0.8-1.2
+                const summerBase = {
+                    r: 45 + Math.random() * 25,   // 45-70 - deep forest green
+                    g: 160 + Math.random() * 60,  // 160-220 - rich summer green
+                    b: 55 + Math.random() * 20    // 55-75 - natural green undertone
+                }
+                
+                return new Color(
+                    Math.floor(Math.max(30, Math.min(90, summerBase.r * summerIntensity))),
+                    Math.floor(Math.max(140, Math.min(240, summerBase.g * summerIntensity))),
+                    Math.floor(Math.max(40, Math.min(85, summerBase.b * summerIntensity))),
+                    0.75 + Math.random() * 0.2, // 75-95% opacity for full summer leaves
+                    true
+                )
+                
+            case 2: // Autumn - smooth gradient from green to warm colors
+                const autumnProgress = seasonProgress // 0=early autumn, 1=late autumn
+                const randomChoice = Math.random()
+                
+                let autumnColor: Color
+                
+                if (randomChoice < 0.25) {
+                    // Staying green (25% chance)
+                    autumnColor = new Color(
+                        Math.floor(60 + autumnProgress * 40), // 60-100
+                        Math.floor(140 - autumnProgress * 30), // 140-110
+                        Math.floor(50 + autumnProgress * 20), // 50-70
+                        0.65 + Math.random() * 0.25, // 65-90% opacity for autumn greens
+                        true
+                    )
+                } else if (randomChoice < 0.45) {
+                    // Yellow transition (20% chance)
+                    autumnColor = new Color(
+                        Math.floor(180 + autumnProgress * 50), // 180-230
+                        Math.floor(190 + autumnProgress * 45), // 190-235
+                        Math.floor(60 + autumnProgress * 30),  // 60-90
+                        0.6 + Math.random() * 0.3, // 60-90% opacity for autumn yellows
+                        true
+                    )
+                } else if (randomChoice < 0.7) {
+                    // Orange transition (25% chance)
+                    autumnColor = new Color(
+                        Math.floor(200 + autumnProgress * 40), // 200-240
+                        Math.floor(120 + autumnProgress * 60), // 120-180
+                        Math.floor(50 + autumnProgress * 20),  // 50-70
+                        0.65 + Math.random() * 0.25, // 65-90% opacity for autumn oranges
+                        true
+                    )
+                } else {
+                    // Red transition (30% chance)
+                    autumnColor = new Color(
+                        Math.floor(160 + autumnProgress * 70), // 160-230
+                        Math.floor(70 + autumnProgress * 40),  // 70-110
+                        Math.floor(45 + autumnProgress * 25),  // 45-70
+                        0.7 + Math.random() * 0.25, // 70-95% opacity for autumn reds
+                        true
+                    )
+                }
+                
+                // Add natural leaf variation
+                autumnColor.r = Math.floor(Math.max(40, Math.min(255, autumnColor.r * (0.9 + leafVariation))))
+                autumnColor.g = Math.floor(Math.max(40, Math.min(255, autumnColor.g * (0.9 + leafVariation))))
+                autumnColor.b = Math.floor(Math.max(30, Math.min(120, autumnColor.b * (0.9 + leafVariation))))
+                
+                return autumnColor
+                
+            case 3: // Winter - withered browns and muted colors
+                const winterBrown = {
+                    r: 100 + Math.random() * 40,  // 100-140 - faded brown
+                    g: 70 + Math.random() * 25,   // 70-95 - muted
+                    b: 40 + Math.random() * 20    // 40-60 - dark undertone
+                }
+                
+                return new Color(
+                    Math.floor(Math.max(70, Math.min(150, winterBrown.r))),
+                    Math.floor(Math.max(50, Math.min(110, winterBrown.g))),
+                    Math.floor(Math.max(30, Math.min(70, winterBrown.b))),
+                    0.7 + Math.random() * 0.3, // Semi-transparent for withered effect
+                    true
+                )
+                
+            default:
+                // Default rich summer green with transparency
+                return new Color(50, 180, 60, 0.8, true)
         }
     }
+}
+
+// Tree branch class for fractal growth
+class TreeBranch {
+    childBranches: TreeBranch[] = []
     
-    spawnSpark() {
-        // Spawn sparks at the front face of the tower
-        const towerSize = 8
-        const blockSize = 0.4  // Match tower generation block size
-        const towerZ = 6.0  // Match updated tower position
-        
-        // Random position on the front face of the tower
-        const x = (Math.random() - 0.5) * towerSize * blockSize * 0.8 // Stay within tower bounds
-        const y = Math.random() * towerSize * blockSize * 0.8 // Random height
-        const z = towerZ - towerSize/2 * blockSize // Front face
-        
-        // Create spark at the tower front with random direction
-        const direction = new Vec3(
-            (Math.random() - 0.5) * 2, // Random horizontal movement
-            Math.random() * 1.5 + 0.5, // Upward movement
-            (Math.random() - 0.5) * 0.5 // Slight forward/backward movement
-        ).normalize()
-        
-        const spark = new ElectricSpark(new Vec3(x, y, z), direction)
-        this.sparks.push(spark)
-    }
+    constructor(
+        public start: Vec3,
+        public direction: Vec3,
+        public radius: number,
+        public targetLength: number,
+        public generation: number,
+        public parent: TreeBranch | null,
+        public length: number = 0.05 // Start with minimal length
+    ) {}
+}
+
+// Tree leaf class
+class TreeLeaf {
+    constructor(
+        public position: Vec3,
+        public branch: TreeBranch,
+        public season: number,
+        public color: Color = new Color(50, 180, 60, 1, true)
+    ) {}
+}
+
+// Falling leaf class with physics
+class FallingLeaf {
+    life: number = 200 // Frames until leaf disappears
     
-    renderSparks(renderer: Renderer3D): PixelList {
-        const pl = new PixelList()
+    constructor(
+        public position: Vec3,
+        public velocity: Vec3,
+        public color: Color
+    ) {}
+    
+    update(): boolean {
+        // Apply gravity and wind
+        this.velocity.y -= 0.0005 // Gravity
+        this.velocity.x += (Math.random() - 0.5) * 0.001 // Wind
+        this.velocity.z += (Math.random() - 0.5) * 0.0005 // Wind
         
-        for (const spark of this.sparks) {
-            pl.add(spark.render(renderer))
-        }
+        // Update position
+        this.position = this.position.add(this.velocity)
         
-        return pl
+        // Fade out over time - make leaves more transparent as they fall
+        this.life--
+        const lifeRatio = this.life / 200
+        this.color.a = Math.max(0, lifeRatio * 0.6) // Maximum 60% opacity, fading to 0
+        
+        // Remove if hit ground or faded out
+        return this.life > 0 && this.position.y > 0
     }
 }
 
 // 2D Sky system with celestial objects - renders as overlay on top half of screen
 class SkySystem2D {
-    // Star array for animated Julia fractal background
+    // Star array for animated lightning effect at night
     stars: {
         baseX: number, 
         baseY: number, 
@@ -911,10 +1330,7 @@ class SkySystem2D {
         brightness: number, 
         color: Color, 
         constellation: string, 
-        type: string,
-        iterations?: number,
-        fractalX?: number,
-        fractalY?: number
+        type: string
     }[] = []
     sun: {x: number, y: number, radius: number, color: Color}
     moon: {x: number, y: number, radius: number, color: Color, phase: number}
@@ -963,14 +1379,14 @@ class SkySystem2D {
         const centerX = width / 2
         const centerY = this.skyHeight / 2
         
-        // Initialize rainbow system
+        // Initialize rainbow and lightning systems
         this.initializeRainbow()
+        this.initializeLightningSystem()
         
           // Generate Northern Lights (Aurora Borealis)
         this.generateNorthernLights()
-        // Create realistic constellations instead of random stars
-        
-        this.generateJuliaFractalStars()
+        // Start with empty stars - lightning appears randomly at night
+        this.stars = []
         
         // Sun - initial position will be calculated based on time
         this.sun = {
@@ -1044,83 +1460,282 @@ class SkySystem2D {
         }
     }
     
-    // Julia fractal parameters for animated starfield
-    juliaParams = {
-        cReal: -0.7269,
-        cImag: 0.1889,
-        maxIterations: 120,  // Increased for more detail and smoother gradients
-        zoom: 1.8,           // Slightly closer for more detail
-        colorCycle: 0,
-        animationSpeed: 0.015,  // Slightly faster animation
-        depthLayers: 3       // Multiple depth layers for 3D effect
+    // Lightning parameters for realistic night-time lightning effect
+    lightningParams = {
+        enabled: false,  // Lightning only shows sometimes
+        nextLightningTime: 0,  // When next lightning will appear
+        currentLightning: null as any,  // Current lightning bolt data
+        duration: 0.3,  // Lightning duration in seconds (very fast)
+        intensity: 1.0,
+        branches: [] as any[],  // Lightning branch dendrites
+        mainChannel: [] as any[]  // Main lightning channel
     }
     
-    // Generate animated Julia fractal starfield
-    generateJuliaFractalStars() {
+    // Generate realistic lightning with dendrites (branching patterns)
+    generateLightning() {
+        this.stars = []  // Clear existing lightning stars
+        this.lightningParams.branches = []
+        this.lightningParams.mainChannel = []
+        
+        // Main lightning channel from cloud to ground with realistic jagged path
+        const startX = this.width * (0.2 + Math.random() * 0.6)  // Random X position across screen
+        const startY = this.skyHeight * (0.05 + Math.random() * 0.15)  // Start from upper sky (clouds)
+        const endX = startX + (Math.random() - 0.5) * this.width * 0.4  // Larger horizontal deviation
+        const endY = this.skyHeight * 0.95  // Near horizon (ground)
+        
+        // Create main channel with realistic stepped leader pattern
+        const channelSegments = 30 + Math.floor(Math.random() * 15)  // More segments for detail
+        let currentX = startX
+        let currentY = startY
+        
+        for (let i = 0; i <= channelSegments; i++) {
+            const t = i / channelSegments
+            
+            // Calculate base progression toward target
+            const targetX = startX + (endX - startX) * t
+            const targetY = startY + (endY - startY) * t
+            
+            // Add stepped leader behavior - lightning moves in discrete jumps
+            const stepProgress = Math.min(1.0, t * 1.2)  // Slightly faster vertical progression
+            const verticalBias = 0.7 + 0.3 * Math.sin(t * Math.PI)  // Stronger downward pull
+            
+            // Calculate next position with realistic lightning physics
+            const baseDeviation = (Math.random() - 0.5) * 20  // Base horizontal wandering
+            const fractalDeviation = Math.sin(t * Math.PI * 8) * 8 + Math.sin(t * Math.PI * 20) * 3  // Multi-frequency zigzag
+            const ionizationPath = Math.sin(t * Math.PI * 6 + Math.random() * Math.PI) * 5  // Ionization effects
+            
+            currentX = targetX + baseDeviation + fractalDeviation + ionizationPath
+            currentY = targetY + (Math.random() - 0.5) * 8 * (1.0 - stepProgress * 0.7)  // Less deviation near ground
+            
+            // Ensure lightning stays within reasonable bounds
+            currentX = Math.max(this.width * 0.05, Math.min(this.width * 0.95, currentX))
+            currentY = Math.max(0, Math.min(this.skyHeight, currentY))
+            
+            const intensity = 1.0 - t * 0.2  // Slight intensity decrease toward ground
+            this.lightningParams.mainChannel.push({ x: currentX, y: currentY, intensity })
+            
+            // Create dendrite branches at random points (more frequent in middle section)
+            let branchChance = 0.15  // Base branch chance
+            if (t > 0.2 && t < 0.8) branchChance = 0.35  // Higher chance in middle
+            if (t > 0.4 && t < 0.6) branchChance = 0.45  // Even higher in center
+            
+            if (Math.random() < branchChance && i > 2 && i < channelSegments - 2) {
+                this.generateLightningBranch(currentX, currentY, intensity, 1, t)
+            }
+            
+            // Add return stroke branches (upward branches that can occur)
+            if (Math.random() < 0.08 && t > 0.6) {  // Return strokes more likely near ground
+                this.generateReturnStroke(currentX, currentY, intensity, t)
+            }
+        }
+    }
+    
+    // Generate lightning branch dendrites with improved realism
+    generateLightningBranch(startX: number, startY: number, parentIntensity: number, depth: number, parentT: number) {
+        if (depth > 5) return  // Limit branch depth
+        
+        const branchLength = (25 - depth * 3) + Math.random() * 10  // Variable length
+        const branchAngle = (Math.random() - 0.5) * Math.PI * 0.9  // Wider angle range
+        const segments = Math.max(3, Math.floor(branchLength / 4))
+        
+        // Add angular bias based on main lightning progress
+        let angleBias = 0
+        if (parentT < 0.5) angleBias = Math.PI * 0.2 * (Math.random() - 0.5)  // Upward bias early on
+        else angleBias = Math.PI * 0.3 * (Math.random() - 0.5)  // Wider spread later
+        
+        const effectiveAngle = branchAngle + angleBias
+        
+        const branch = []
+        let currentX = startX
+        let currentY = startY
+        
+        for (let i = 0; i <= segments; i++) {
+            const t = i / segments
+            const distance = branchLength * t
+            
+            // More natural branching with air resistance and ionization
+            const targetX = startX + Math.cos(effectiveAngle) * distance
+            const targetY = startY + Math.sin(effectiveAngle) * distance
+            
+            // Add fractal-like deviation for realistic path
+            const pathDeviation = (Math.random() - 0.5) * 4 / depth  // Less deviation for deeper branches
+            const ionizationNoise = Math.sin(t * Math.PI * 4) * 2 / depth
+            
+            currentX = targetX + pathDeviation + ionizationNoise
+            currentY = targetY + pathDeviation * 0.5  // Less vertical deviation
+            
+            // Ensure branch stays in bounds
+            currentX = Math.max(0, Math.min(this.width, currentX))
+            currentY = Math.max(0, Math.min(this.skyHeight, currentY))
+            
+            const intensity = parentIntensity * (1.0 - t * 0.6) / Math.sqrt(depth)
+            branch.push({ x: currentX, y: currentY, intensity })
+            
+            // Chance for sub-branches (lower for deeper levels)
+            const subBranchChance = Math.max(0.05, 0.4 / (depth * depth))
+            if (Math.random() < subBranchChance && i > 1 && i < segments - 1) {
+                this.generateLightningBranch(currentX, currentY, intensity, depth + 1, parentT + t * 0.1)
+            }
+        }
+        
+        this.lightningParams.branches.push(branch)
+    }
+    
+    // Generate return stroke (upward lightning branch)
+    generateReturnStroke(startX: number, startY: number, parentIntensity: number, parentT: number) {
+        const strokeLength = 10 + Math.random() * 15
+        const upwardAngle = -Math.PI * 0.3 - Math.random() * Math.PI * 0.4  // Upward angles
+        const segments = Math.floor(strokeLength / 3)
+        
+        const stroke = []
+        for (let i = 0; i <= segments; i++) {
+            const t = i / segments
+            const distance = strokeLength * t
+            
+            const x = startX + Math.cos(upwardAngle) * distance + (Math.random() - 0.5) * 2
+            const y = startY + Math.sin(upwardAngle) * distance + (Math.random() - 0.5) * 2
+            const intensity = parentIntensity * (1.0 - t * 0.8) * 0.6  // Dimmer than main channel
+            
+            stroke.push({ x, y, intensity })
+        }
+        
+        this.lightningParams.branches.push(stroke)
+    }
+    
+    // Convert lightning channels to star-like points for rendering with enhanced detail
+    convertLightningToStars() {
         this.stars = []
         
-        // Much higher density for intense, detailed fractal
-        const samplesX = 60   // Doubled density for more intensity
-        const samplesY = 36   // Doubled density for more intensity
-        
-        // Generate multiple depth layers for 3D effect
-        for (let layer = 0; layer < this.juliaParams.depthLayers; layer++) {
-            const layerZoom = this.juliaParams.zoom * (1 + layer * 0.3)  // Different zoom per layer
-            const layerOffset = layer * 0.1  // Slight offset per layer
+        // Add main channel points with high detail
+        for (let i = 0; i < this.lightningParams.mainChannel.length; i++) {
+            const point = this.lightningParams.mainChannel[i]
+            const intensity = point.intensity
             
-            for (let x = 0; x < samplesX; x++) {
-                for (let y = 0; y < samplesY; y++) {
-                    // Convert screen coordinates to fractal coordinates with layered mapping
-                    const fractalX = (x / samplesX - 0.5) * 3.5 / layerZoom + layerOffset
-                    const fractalY = (y / samplesY - 0.5) * 2.8 / layerZoom + layerOffset * 0.7
+            // Add main channel point with maximum intensity
+            this.stars.push({
+                baseX: point.x,
+                baseY: point.y,
+                x: point.x,
+                y: point.y,
+                brightness: intensity * 1.2,  // Brighter main channel
+                color: this.getLightningColor(intensity * 1.2, 0),
+                constellation: 'lightning',
+                type: 'main_channel'
+            })
+            
+            // Add connecting segments between main points for continuity
+            if (i > 0) {
+                const prevPoint = this.lightningParams.mainChannel[i - 1]
+                const segmentSteps = 3  // Steps between main points
+                
+                for (let step = 1; step < segmentSteps; step++) {
+                    const t = step / segmentSteps
+                    const segmentX = prevPoint.x + (point.x - prevPoint.x) * t
+                    const segmentY = prevPoint.y + (point.y - prevPoint.y) * t
+                    const segmentIntensity = (prevPoint.intensity + point.intensity) / 2 * 0.8
                     
-                    // Calculate Julia set iteration count at this point
-                    const iterations = this.calculateJuliaPoint(fractalX, fractalY)
+                    this.stars.push({
+                        baseX: segmentX,
+                        baseY: segmentY,
+                        x: segmentX,
+                        y: segmentY,
+                        brightness: segmentIntensity,
+                        color: this.getLightningColor(segmentIntensity, 0),
+                        constellation: 'lightning',
+                        type: 'main_segment'
+                    })
+                }
+            }
+            
+            // Add intense glow around main channel points
+            const glowRadius = 3 + intensity * 2
+            const glowLayers = 3
+            
+            for (let layer = 0; layer < glowLayers; layer++) {
+                const layerRadius = (layer + 1) * (glowRadius / glowLayers)
+                const pointsInLayer = 6 + layer * 2  // More points in outer layers
+                
+                for (let p = 0; p < pointsInLayer; p++) {
+                    const angle = (p * Math.PI * 2) / pointsInLayer
+                    const glowX = point.x + Math.cos(angle) * layerRadius
+                    const glowY = point.y + Math.sin(angle) * layerRadius
+                    const glowIntensity = intensity * (0.8 - layer * 0.2)
                     
-                    // More diverse criteria for star creation - create denser patterns
-                    const shouldCreateStar = (
-                        (iterations > 2 && iterations < this.juliaParams.maxIterations - 5) ||  // Broader edge regions
-                        (iterations > 8 && iterations < 25) ||                                   // Enhanced mid-range
-                        (iterations > 30 && iterations < 60) ||                                  // New high-detail region
-                        (iterations > 80 && iterations < this.juliaParams.maxIterations - 3) || // Near-escape enhanced
-                        (layer > 0 && iterations > 15 && iterations < 45)                       // Layer-specific patterns
-                    )
+                    this.stars.push({
+                        baseX: glowX,
+                        baseY: glowY,
+                        x: glowX,
+                        y: glowY,
+                        brightness: glowIntensity,
+                        color: this.getLightningColor(glowIntensity, layer + 1),
+                        constellation: 'lightning',
+                        type: 'main_glow'
+                    })
+                }
+            }
+        }
+        
+        // Add branch points with connecting segments
+        for (const branch of this.lightningParams.branches) {
+            for (let i = 0; i < branch.length; i++) {
+                const point = branch[i]
+                
+                // Main branch point
+                this.stars.push({
+                    baseX: point.x,
+                    baseY: point.y,
+                    x: point.x,
+                    y: point.y,
+                    brightness: point.intensity,
+                    color: this.getLightningColor(point.intensity, 1),
+                    constellation: 'lightning',
+                    type: 'branch'
+                })
+                
+                // Add connecting segments between branch points
+                if (i > 0) {
+                    const prevPoint = branch[i - 1]
+                    const segmentSteps = 2  // Fewer steps for branches
                     
-                    if (shouldCreateStar) {
-                        // Convert back to screen coordinates
-                        const screenX = (x / samplesX) * this.width
-                        const screenY = (y / samplesY) * this.skyHeight
+                    for (let step = 1; step < segmentSteps; step++) {
+                        const t = step / segmentSteps
+                        const segmentX = prevPoint.x + (point.x - prevPoint.x) * t
+                        const segmentY = prevPoint.y + (point.y - prevPoint.y) * t
+                        const segmentIntensity = (prevPoint.intensity + point.intensity) / 2 * 0.7
                         
-                        // Enhanced brightness calculation with smoother gradients
-                        let brightness: number
-                        const normalizedIter = iterations / this.juliaParams.maxIterations
-                        
-                        if (iterations < 15) {
-                            brightness = 0.4 + (iterations / 15) * 0.5  // Brighter for low iterations
-                        } else if (iterations < 40) {
-                            brightness = 0.9 - ((iterations - 15) / 25) * 0.4  // Peak brightness in mid-range
-                        } else if (iterations < 80) {
-                            brightness = 0.5 + ((iterations - 40) / 40) * 0.4   // Gradual increase
-                        } else {
-                            brightness = 0.6 + ((iterations - 80) / (this.juliaParams.maxIterations - 80)) * 0.3
-                        }
-                        
-                        // Layer depth adjustment - background layers dimmer
-                        brightness *= (1.0 - layer * 0.15)
-                        
-                        // Create fractal "star" with layer information
                         this.stars.push({
-                            baseX: screenX,
-                            baseY: screenY,
-                            x: screenX,
-                            y: screenY,
-                            brightness: brightness,
-                            iterations: iterations,
-                            fractalX: fractalX,
-                            fractalY: fractalY,
-                            color: this.getFractalColor(iterations, 0, layer), // Enhanced color with layer
-                            constellation: 'fractal',
-                            type: `fractal_layer_${layer}`  // Store layer in type for identification
+                            baseX: segmentX,
+                            baseY: segmentY,
+                            x: segmentX,
+                            y: segmentY,
+                            brightness: segmentIntensity,
+                            color: this.getLightningColor(segmentIntensity, 1),
+                            constellation: 'lightning',
+                            type: 'branch_segment'
+                        })
+                    }
+                }
+                
+                // Add smaller glow for significant branch points
+                if (point.intensity > 0.4) {
+                    const branchGlowRadius = 1.5
+                    const branchGlowPoints = 4
+                    
+                    for (let g = 0; g < branchGlowPoints; g++) {
+                        const angle = (g * Math.PI * 2) / branchGlowPoints
+                        const glowX = point.x + Math.cos(angle) * branchGlowRadius
+                        const glowY = point.y + Math.sin(angle) * branchGlowRadius
+                        const glowIntensity = point.intensity * 0.5
+                        
+                        this.stars.push({
+                            baseX: glowX,
+                            baseY: glowY,
+                            x: glowX,
+                            y: glowY,
+                            brightness: glowIntensity,
+                            color: this.getLightningColor(glowIntensity, 2),
+                            constellation: 'lightning',
+                            type: 'branch_glow'
                         })
                     }
                 }
@@ -1128,142 +1743,172 @@ class SkySystem2D {
         }
     }
     
-    // Calculate Julia set iteration count for a point
-    calculateJuliaPoint(x: number, y: number): number {
-        let zReal = x
-        let zImag = y
-        let iterations = 0
+    // Get realistic lightning colors with smooth gradients (white-blue-purple-violet)
+    getLightningColor(intensity: number, glowLevel: number = 0): Color {
+        // Lightning color progression: brilliant white -> electric blue -> purple -> violet
+        let r: number, g: number, b: number
         
-        while (iterations < this.juliaParams.maxIterations) {
-            // z = z^2 + c
-            const zRealNew = zReal * zReal - zImag * zImag + this.juliaParams.cReal
-            const zImagNew = 2 * zReal * zImag + this.juliaParams.cImag
-            
-            zReal = zRealNew
-            zImag = zImagNew
-            
-            // Check if point escapes
-            if (zReal * zReal + zImag * zImag > 4) {
-                break
-            }
-            
-            iterations++
+        // Adjust intensity based on glow level
+        const effectiveIntensity = intensity * Math.max(0.3, 1.0 - glowLevel * 0.2)
+        
+        if (effectiveIntensity > 0.85) {
+            // Core lightning: brilliant white with slight blue tint (plasma temperature)
+            r = 255
+            g = 255
+            b = Math.floor(250 + glowLevel * 5)
+        } else if (effectiveIntensity > 0.6) {
+            // High-intensity: electric blue-white
+            const blueProgress = (0.85 - effectiveIntensity) / 0.25
+            r = Math.floor(255 - blueProgress * 80)
+            g = Math.floor(255 - blueProgress * 60)
+            b = 255
+        } else if (effectiveIntensity > 0.35) {
+            // Mid-intensity: electric blue to purple
+            const purpleProgress = (0.6 - effectiveIntensity) / 0.25
+            r = Math.floor(175 + purpleProgress * 40)
+            g = Math.floor(195 - purpleProgress * 80)
+            b = 255
+        } else if (effectiveIntensity > 0.15) {
+            // Lower intensity: purple to violet
+            const violetProgress = (0.35 - effectiveIntensity) / 0.2
+            r = Math.floor(215 - violetProgress * 80)
+            g = Math.floor(115 - violetProgress * 50)
+            b = Math.floor(255 - violetProgress * 25)
+        } else {
+            // Very low intensity: deep violet to indigo
+            const indigoProgress = effectiveIntensity / 0.15
+            r = Math.floor(75 + indigoProgress * 60)
+            g = Math.floor(25 + indigoProgress * 40)
+            b = Math.floor(180 + indigoProgress * 50)
         }
         
-        return iterations
+        // Add subtle color temperature variation for realism
+        const tempVariation = Math.sin(glowLevel * Math.PI) * 0.05
+        r = Math.floor(r * (1.0 + tempVariation))
+        g = Math.floor(g * (1.0 - tempVariation * 0.5))
+        b = Math.floor(b * (1.0 + tempVariation * 0.3))
+        
+        // Ensure values stay in valid range
+        r = Math.max(0, Math.min(255, r))
+        g = Math.max(0, Math.min(255, g))
+        b = Math.max(0, Math.min(255, b))
+        
+        return new Color(r, g, b, 1, true)
     }
     
-    // Generate smooth cycling colors for fractal (synthwave-themed) with layer support
-    getFractalColor(iterations: number, colorCycle: number, layer: number = 0): Color {
-        // Create smooth color transitions using sine waves with synthwave palette
-        const normalizedIter = iterations / this.juliaParams.maxIterations
-        const cycleOffset = colorCycle * Math.PI * 2
-        
-        // Layer-specific color variations for depth effect
-        const layerHueShift = layer * Math.PI * 0.4  // Different hue per layer
-        const layerIntensity = 1.0 - layer * 0.1     // Dimmer background layers
-        
-        // Enhanced color mixing with synthwave bias and layer variations
-        const baseRed = 128 + 127 * Math.sin(normalizedIter * 6 + cycleOffset + layerHueShift)
-        const baseGreen = 128 + 127 * Math.sin(normalizedIter * 4 + cycleOffset + Math.PI * 0.33 + layerHueShift)
-        const baseBlue = 128 + 127 * Math.sin(normalizedIter * 8 + cycleOffset + Math.PI * 0.66 + layerHueShift)
-        
-        // Strong synthwave color transformation with enhanced intensity
-        const synthRed = Math.floor(baseRed * 0.7 + baseBlue * 0.6)     // Enhanced purple/magenta
-        const synthGreen = Math.floor(baseGreen * 0.5 + baseBlue * 0.4) // Stronger cyan accent
-        const synthBlue = Math.floor(baseBlue * 1.4)                    // Intensified blue/purple
-        
-        // Multi-frequency neon intensity cycling for more dynamic effect
-        const neonPulse1 = 0.7 + 0.3 * Math.sin(colorCycle * Math.PI * 6)
-        const neonPulse2 = 0.8 + 0.2 * Math.cos(colorCycle * Math.PI * 4.7)
-        const combinedPulse = (neonPulse1 + neonPulse2) / 2 * layerIntensity
-        
-        // Additional color complexity based on iteration bands
-        let colorBoost = 1.0
-        if (iterations < 20) colorBoost = 1.3      // Bright inner regions
-        else if (iterations < 60) colorBoost = 1.1 // Mid regions
-        else colorBoost = 0.9                      // Outer regions
-        
-        return new Color(
-            Math.min(255, Math.max(30, Math.floor(synthRed * combinedPulse * colorBoost))),
-            Math.min(255, Math.max(30, Math.floor(synthGreen * combinedPulse * colorBoost))),
-            Math.min(255, Math.max(50, Math.floor(synthBlue * combinedPulse * colorBoost))),
-            1, true
-        )
+
+    // Initialize lightning system
+    initializeLightningSystem() {
+        this.lightningParams.enabled = false
+        this.lightningParams.nextLightningTime = Math.random() * 10 + 5  // First lightning in 5-15 seconds
+        this.lightningParams.currentLightning = null
+        this.stars = []  // Start with no lightning
     }
     
-    // Update Julia fractal animation using unified time system with enhanced dynamics
-    updateJuliaFractal(timeOfDay: number, fractalSpeed: number = 1.0, intensity: number = 0.7) {
-        // More complex animation of Julia set parameters with multiple time scales
-        const fractalTime = timeOfDay * fractalSpeed * Math.PI * 2
-        const slowTime = timeOfDay * fractalSpeed * 0.3 * Math.PI * 2  // Slower variation
-        const fastTime = timeOfDay * fractalSpeed * 1.7 * Math.PI * 2  // Faster variation
+    // Update lightning system - only shows at night and occasionally
+    updateLightningSystem(timeOfDay: number, currentTime: number, intensity: number = 0.7, frequency: number = 1.0) {
+        // Lightning only appears at night
+        const isNightTime = timeOfDay < 0.18 || timeOfDay > 0.82
         
-        // Multi-layered parameter animation for more complex patterns
-        this.juliaParams.cReal = -0.7269 + 
-            0.12 * Math.sin(fractalTime * 3.7) + 
-            0.05 * Math.cos(slowTime * 2.1) +
-            0.03 * Math.sin(fastTime * 7.3)
-            
-        this.juliaParams.cImag = 0.1889 + 
-            0.12 * Math.cos(fractalTime * 2.3) + 
-            0.06 * Math.sin(slowTime * 1.8) +
-            0.04 * Math.cos(fastTime * 5.9)
-            
-        // Enhanced color cycling with multiple frequencies
-        this.juliaParams.colorCycle = (timeOfDay * this.juliaParams.animationSpeed * fractalSpeed * 2.5) % 1.0
+        if (!isNightTime) {
+            // Clear lightning during day
+            if (this.lightningParams.enabled) {
+                this.lightningParams.enabled = false
+                this.stars = []
+            }
+            return
+        }
         
-        // Animate zoom for breathing effect
-        this.juliaParams.zoom = 1.8 + 0.3 * Math.sin(slowTime * 1.1)
-        
-        // Update each fractal star with enhanced animation
-        for (let i = 0; i < this.stars.length; i++) {
-            const star = this.stars[i]
+        // Check if it's time for next lightning
+        if (!this.lightningParams.enabled && currentTime >= this.lightningParams.nextLightningTime) {
+            // Random chance for lightning (more likely during certain night hours)
+            let lightningChance = 0.15 * frequency  // Base chance affected by frequency control
             
-            // Extract layer from type string
-            const layer = star.type.startsWith('fractal_layer_') ? 
-                parseInt(star.type.split('_')[2]) || 0 : 0
-            
-            // Recalculate Julia point with animated parameters and layer-specific zoom
-            const layerZoom = this.juliaParams.zoom * (1 + layer * 0.3)
-            const layerOffset = layer * 0.1
-            const adjustedFractalX = star.fractalX! * (layerZoom / 1.8) + layerOffset
-            const adjustedFractalY = star.fractalY! * (layerZoom / 1.8) + layerOffset * 0.7
-            
-            const newIterations = this.calculateJuliaPoint(adjustedFractalX, adjustedFractalY)
-            star.iterations = newIterations
-            
-            // Enhanced brightness calculation with more dynamic range
-            const normalizedIter = newIterations / this.juliaParams.maxIterations
-            let baseBrightness: number
-            
-            if (newIterations < 20) {
-                baseBrightness = 0.5 + (newIterations / 20) * 0.4
-            } else if (newIterations < 50) {
-                baseBrightness = 0.9 - ((newIterations - 20) / 30) * 0.3
-            } else if (newIterations < 90) {
-                baseBrightness = 0.6 + ((newIterations - 50) / 40) * 0.3
-            } else {
-                baseBrightness = 0.7 + ((newIterations - 90) / (this.juliaParams.maxIterations - 90)) * 0.2
+            // Higher chance during deep night (around midnight)
+            if (timeOfDay > 0.95 || timeOfDay < 0.05) {
+                lightningChance = 0.3 * frequency
             }
             
-            // Layer and user intensity adjustments
-            const layerDimming = 1.0 - layer * 0.12
-            star.brightness = baseBrightness * intensity * layerDimming
+            // Very rare but more dramatic during twilight
+            if ((timeOfDay > 0.82 && timeOfDay < 0.9) || (timeOfDay > 0.1 && timeOfDay < 0.18)) {
+                lightningChance = 0.1 * frequency
+            }
             
-            // Update color with current color cycle and layer
-            star.color = this.getFractalColor(newIterations, this.juliaParams.colorCycle, layer)
+            if (Math.random() < lightningChance) {
+                // Trigger lightning
+                this.lightningParams.enabled = true
+                this.lightningParams.currentLightning = {
+                    startTime: currentTime,
+                    flashCount: 1 + Math.floor(Math.random() * 2),  // 1-2 flashes typically
+                    currentFlash: 0
+                }
+                
+                // Generate new lightning bolt
+                this.generateLightning()
+                this.convertLightningToStars()
+                
+                console.log("⚡ Lightning strike at night!")
+            }
             
-            // Enhanced position animation with layer-specific movement patterns
-            const flowTime = timeOfDay * fractalSpeed * Math.PI * 2
-            const layerFlow = 1.0 + layer * 0.3  // Different flow speeds per layer
-            const flowX = 3 * Math.sin(flowTime * 1.3 * layerFlow + star.fractalX! * 4) +
-                         1.5 * Math.cos(flowTime * 0.7 * layerFlow + star.fractalY! * 3)
-            const flowY = 3 * Math.cos(flowTime * 1.1 * layerFlow + star.fractalY! * 4) +
-                         1.5 * Math.sin(flowTime * 0.9 * layerFlow + star.fractalX! * 3)
+            // Set next lightning check time (inversely related to frequency)
+            const baseInterval = 8 / Math.max(0.1, frequency)  // More frequent with higher frequency
+            this.lightningParams.nextLightningTime = currentTime + baseInterval + Math.random() * baseInterval
+        }
+        
+        // Update active lightning
+        if (this.lightningParams.enabled && this.lightningParams.currentLightning) {
+            const elapsed = currentTime - this.lightningParams.currentLightning.startTime
+            const flashDuration = 0.08  // Each flash lasts 0.08 seconds - very fast
+            const flashInterval = 0.25   // 0.25 seconds between flashes
             
-            star.x = star.baseX + flowX
-            star.y = star.baseY + flowY
+            // Check if current flash should end
+            const currentFlashStart = this.lightningParams.currentLightning.currentFlash * flashInterval
+            const currentFlashEnd = currentFlashStart + flashDuration
+            
+            if (elapsed > currentFlashEnd && elapsed < currentFlashStart + flashInterval) {
+                // In dark period between flashes
+                this.stars = []
+            } else if (elapsed > currentFlashStart + flashInterval) {
+                // Start next flash
+                this.lightningParams.currentLightning.currentFlash++
+                
+                if (this.lightningParams.currentLightning.currentFlash >= this.lightningParams.currentLightning.flashCount) {
+                    // Lightning sequence finished
+                    this.lightningParams.enabled = false
+                    this.lightningParams.currentLightning = null
+                    this.stars = []
+                } else {
+                    // Generate slightly different lightning pattern for next flash
+                    this.generateLightning()
+                    this.convertLightningToStars()
+                }
+            } else if (elapsed >= currentFlashStart && elapsed <= currentFlashEnd) {
+                // Active flash - update intensity with realistic flash curve
+                const flashProgress = (elapsed - currentFlashStart) / flashDuration
+                const flashIntensity = intensity * this.getLightningFlashIntensity(flashProgress)
+                
+                // Update star intensities
+                for (let star of this.stars) {
+                    if (star.constellation === 'lightning') {
+                        star.brightness = star.brightness * flashIntensity
+                        // Update color temperature during flash
+                        star.color = this.getLightningColor(star.brightness * flashIntensity, 
+                            star.type === 'main_channel' ? 0 : (star.type.includes('glow') ? 1 : 2))
+                    }
+                }
+            }
+        }
+    }
+    
+    // Get realistic lightning flash intensity curve
+    getLightningFlashIntensity(progress: number): number {
+        // Lightning has a sharp peak at the beginning then rapid decay
+        if (progress < 0.1) {
+            return 1.0  // Full intensity at start
+        } else if (progress < 0.3) {
+            return 1.0 - (progress - 0.1) * 1.5  // Sharp drop
+        } else {
+            return Math.max(0.1, 0.7 - (progress - 0.3) * 0.8)  // Gradual fade
         }
     }
     
@@ -1612,122 +2257,96 @@ class SkySystem2D {
         ]
     }
     
-    // Render realistic rainbow arc with proper optics and atmospheric effects
+    // Render realistic rainbow arc with advanced blending and atmospheric fade
     renderRainbow(pl: PixelList, timeOfDay: number, screenHeight: number, intensity: number = 1.0) {
         if (!this.rainbow.enabled) return
-        
-        // Rainbow visibility based on atmospheric conditions and time of day
         let rainbowVisibility: number
         if (timeOfDay >= 0.25 && timeOfDay <= 0.75) {
-            // Daytime - rainbow visibility peaks when sun is at optimal angle (not too high)
-            const noonDistance = Math.abs(timeOfDay - 0.5)  // Distance from noon
-            // Best rainbow conditions are slightly off-noon when sun is at 40-42° angle
-            const optimalDistance = 0.15  // Optimal time offset from noon
+            const noonDistance = Math.abs(timeOfDay - 0.5)
+            const optimalDistance = 0.15
             const distanceFromOptimal = Math.abs(noonDistance - optimalDistance)
-            rainbowVisibility = Math.max(0, 1.0 - (distanceFromOptimal * 6))  // Peak visibility at optimal angle
+            rainbowVisibility = Math.max(0, 1.0 - (distanceFromOptimal * 6))
         } else {
-            rainbowVisibility = 0  // No rainbow at night
+            rainbowVisibility = 0
         }
-        
         if (rainbowVisibility <= 0.02) return
-        
         const horizonY = Math.floor(screenHeight * 0.8)
         const centerX = this.width / 2
         const centerY = this.rainbow.centerY
-        
-        // Calculate atmospheric scattering effects for realistic rainbow appearance
-        const scatteringFactor = Math.sin(timeOfDay * Math.PI * 2) * 0.3 + 0.7  // Varies with sun angle
-        
-        // Primary rainbow: red on outside, violet on inside (42° arc)
+        const scatteringFactor = Math.sin(timeOfDay * Math.PI * 2) * 0.3 + 0.7
+        // Primary rainbow: advanced blending
         for (let colorIndex = 0; colorIndex < this.rainbow.colors.length; colorIndex++) {
             const color = this.rainbow.colors[colorIndex].copy()
-            
-            // Calculate precise arc radius - red band is outermost
             const bandOffset = colorIndex * (this.rainbow.thickness / this.rainbow.colors.length)
             const bandRadius = this.rainbow.radius - bandOffset
-            const bandThickness = this.rainbow.thickness / this.rainbow.colors.length * 1.2  // Slightly thicker bands
-            
-            // Rainbow arc spans approximately 84° (42° radius from center)
-            const startAngle = Math.PI * 0.08  // Start slightly inward from horizon
-            const endAngle = Math.PI * 0.92    // End slightly inward from horizon
-            
-            // Render smooth arc with proper curvature
-            const angleStep = 0.008  // Very fine steps for ultra-smooth curve
+            const bandThickness = this.rainbow.thickness / this.rainbow.colors.length * 1.4
+            const startAngle = Math.PI * 0.08
+            const endAngle = Math.PI * 0.92
+            const angleStep = 0.006
             for (let angle = startAngle; angle <= endAngle; angle += angleStep) {
                 const arcX = centerX + Math.cos(angle) * bandRadius
-                const arcY = centerY + Math.sin(angle) * bandRadius * 0.6  // Realistic arc ratio
-                
-                // Only render if within bounds and above horizon
+                const arcY = centerY + Math.sin(angle) * bandRadius * 0.6
                 if (arcX >= 0 && arcX < this.width && arcY >= 0 && arcY < horizonY) {
-                    // Calculate distance from horizon for fade effect
                     const heightAboveHorizon = (horizonY - arcY) / horizonY
-                    const heightFade = Math.pow(heightAboveHorizon, 0.3)  // Fade near horizon
-                    
-                    // Create band thickness with gradient edges
+                    const heightFade = Math.pow(heightAboveHorizon, 0.25)
                     for (let thick = 0; thick < bandThickness; thick++) {
-                        const thickY = arcY - thick * 0.7  // Slightly compressed vertically
+                        const thickY = arcY - thick * 0.7
                         if (thickY >= 0 && thickY < horizonY) {
-                            // Smooth edge gradient within each color band
                             const edgePosition = thick / bandThickness
-                            const edgeOpacity = Math.sin(edgePosition * Math.PI) * 0.8 + 0.2  // Bell curve opacity
-                            
-                            // Color intensity varies with wavelength (red is more intense)
-                            const wavelengthIntensity = colorIndex === 0 ? 1.2 :    // Red
-                                                      colorIndex === 1 ? 1.1 :    // Orange  
-                                                      colorIndex === 2 ? 1.0 :    // Yellow
-                                                      colorIndex === 3 ? 0.9 :    // Green
-                                                      colorIndex === 4 ? 0.8 :    // Blue
-                                                      colorIndex === 5 ? 0.6 :    // Indigo
-                                                      0.5                          // Violet
-                            
-                            // Apply all realistic factors
-                            color.a = this.rainbow.opacity * rainbowVisibility * intensity * 
-                                     edgeOpacity * heightFade * scatteringFactor * wavelengthIntensity * 0.7
-                            
-                            if (color.a > 0.03) {
-                                this.renderSubpixelStar(pl, arcX, thickY, color)
+                            // Soft Gaussian edge for realism
+                            const edgeOpacity = Math.exp(-Math.pow(edgePosition - 0.5, 2) / 0.08)
+                            // Blend with adjacent colors for smooth transitions
+                            let blendColor = color.copy()
+                            if (colorIndex < this.rainbow.colors.length - 1) {
+                                const nextColor = this.rainbow.colors[colorIndex + 1].copy()
+                                blendColor.r = Math.floor(color.r * (1 - edgePosition) + nextColor.r * edgePosition)
+                                blendColor.g = Math.floor(color.g * (1 - edgePosition) + nextColor.g * edgePosition)
+                                blendColor.b = Math.floor(color.b * (1 - edgePosition) + nextColor.b * edgePosition)
+                            }
+                            // Color intensity varies with wavelength
+                            const wavelengthIntensity = colorIndex === 0 ? 1.2 : colorIndex === 1 ? 1.1 : colorIndex === 2 ? 1.0 : colorIndex === 3 ? 0.9 : colorIndex === 4 ? 0.8 : colorIndex === 5 ? 0.6 : 0.5
+                            blendColor.a = this.rainbow.opacity * rainbowVisibility * intensity * edgeOpacity * heightFade * scatteringFactor * wavelengthIntensity * 0.8
+                            if (blendColor.a > 0.02) {
+                                this.renderSubpixelStar(pl, arcX, thickY, blendColor)
                             }
                         }
                     }
                 }
             }
         }
-        
-        // Secondary rainbow (supernumerary rainbow) - fainter, reversed colors, larger radius
+        // Secondary rainbow: fainter, reversed colors, more blending
         if (rainbowVisibility > 0.5 && intensity > 0.7) {
-            const secondaryRadius = this.rainbow.radius * 1.25  // 25% larger radius (51° arc)
-            const secondaryOpacity = this.rainbow.opacity * 0.3  // Much fainter
-            const secondaryThickness = this.rainbow.thickness * 0.8  // Slightly thinner
-            
-            // Reversed color order (violet outside, red inside)
+            const secondaryRadius = this.rainbow.radius * 1.25
+            const secondaryOpacity = this.rainbow.opacity * 0.22
+            const secondaryThickness = this.rainbow.thickness * 0.7
             for (let colorIndex = this.rainbow.colors.length - 1; colorIndex >= 0; colorIndex--) {
                 const color = this.rainbow.colors[colorIndex].copy()
                 const bandOffset = (this.rainbow.colors.length - 1 - colorIndex) * (secondaryThickness / this.rainbow.colors.length)
-                const bandRadius = secondaryRadius + bandOffset  // Note: + instead of - for secondary
+                const bandRadius = secondaryRadius + bandOffset
                 const bandThickness = secondaryThickness / this.rainbow.colors.length
-                
                 const startAngle = Math.PI * 0.05
                 const endAngle = Math.PI * 0.95
-                
-                for (let angle = startAngle; angle <= endAngle; angle += 0.012) {  // Coarser for secondary
+                for (let angle = startAngle; angle <= endAngle; angle += 0.01) {
                     const arcX = centerX + Math.cos(angle) * bandRadius
                     const arcY = centerY + Math.sin(angle) * bandRadius * 0.6
-                    
                     if (arcX >= 0 && arcX < this.width && arcY >= 0 && arcY < horizonY) {
                         const heightAboveHorizon = (horizonY - arcY) / horizonY
-                        const heightFade = Math.pow(heightAboveHorizon, 0.4)
-                        
+                        const heightFade = Math.pow(heightAboveHorizon, 0.3)
                         for (let thick = 0; thick < bandThickness; thick++) {
                             const thickY = arcY - thick * 0.6
                             if (thickY >= 0 && thickY < horizonY) {
                                 const edgePosition = thick / bandThickness
-                                const edgeOpacity = Math.sin(edgePosition * Math.PI) * 0.6 + 0.1
-                                
-                                color.a = secondaryOpacity * rainbowVisibility * intensity * 
-                                         edgeOpacity * heightFade * scatteringFactor * 0.5
-                                
-                                if (color.a > 0.02) {
-                                    this.renderSubpixelStar(pl, arcX, thickY, color)
+                                const edgeOpacity = Math.exp(-Math.pow(edgePosition - 0.5, 2) / 0.12)
+                                let blendColor = color.copy()
+                                if (colorIndex > 0) {
+                                    const prevColor = this.rainbow.colors[colorIndex - 1].copy()
+                                    blendColor.r = Math.floor(color.r * (1 - edgePosition) + prevColor.r * edgePosition)
+                                    blendColor.g = Math.floor(color.g * (1 - edgePosition) + prevColor.g * edgePosition)
+                                    blendColor.b = Math.floor(color.b * (1 - edgePosition) + prevColor.b * edgePosition)
+                                }
+                                blendColor.a = secondaryOpacity * rainbowVisibility * intensity * edgeOpacity * heightFade * scatteringFactor * 0.6
+                                if (blendColor.a > 0.01) {
+                                    this.renderSubpixelStar(pl, arcX, thickY, blendColor)
                                 }
                             }
                         }
@@ -1735,24 +2354,19 @@ class SkySystem2D {
                 }
             }
         }
-        
-        // Add supernumerary bands (interference fringes) inside primary rainbow for ultra-realism
+        // Supernumerary bands: faint, white, Gaussian edges
         if (rainbowVisibility > 0.8 && intensity > 0.8) {
-            const superRadius = this.rainbow.radius * 0.85  // Inside primary rainbow
-            const superOpacity = this.rainbow.opacity * 0.15  // Very faint
-            
-            // Create 2-3 faint interference bands
+            const superRadius = this.rainbow.radius * 0.85
+            const superOpacity = this.rainbow.opacity * 0.12
             for (let band = 0; band < 3; band++) {
-                const bandRadius = superRadius - (band * 8)  // Close spacing
-                const bandColor = new Color(255, 255, 255, superOpacity * (0.8 - band * 0.2), true)  // White interference
-                
-                for (let angle = Math.PI * 0.2; angle <= Math.PI * 0.8; angle += 0.015) {
+                const bandRadius = superRadius - (band * 8)
+                for (let angle = Math.PI * 0.2; angle <= Math.PI * 0.8; angle += 0.012) {
                     const arcX = centerX + Math.cos(angle) * bandRadius
                     const arcY = centerY + Math.sin(angle) * bandRadius * 0.6
-                    
                     if (arcX >= 0 && arcX < this.width && arcY >= 0 && arcY < horizonY) {
-                        bandColor.a = superOpacity * rainbowVisibility * intensity * (0.5 - band * 0.1)
-                        if (bandColor.a > 0.01) {
+                        const bandAlpha = superOpacity * rainbowVisibility * intensity * (0.5 - band * 0.1)
+                        if (bandAlpha > 0.008) {
+                            const bandColor = new Color(255, 255, 255, bandAlpha, true)
                             this.renderSubpixelStar(pl, arcX, arcY, bandColor)
                         }
                     }
@@ -1762,7 +2376,7 @@ class SkySystem2D {
     }
     
     // Complete render method to integrate all sky elements
-    render(time: number, timeOfDay: number, windSpeed: number = 0.21, screenHeight: number = 8, fractalSpeed: number = 1.0, fractalIntensity: number = 0.7, auroraIntensity: number = 0.8, showAurora: boolean = true, showRainbow: boolean = true): PixelList {
+    render(time: number, timeOfDay: number, windSpeed: number = 0.21, screenHeight: number = 8, lightningFrequency: number = 1.0, lightningIntensity: number = 0.7, auroraIntensity: number = 0.8, showAurora: boolean = true, showRainbow: boolean = true): PixelList {
         const pl = new PixelList()
         
         // Calculate horizon line - sky elements only visible above this line
@@ -1782,8 +2396,8 @@ class SkySystem2D {
         this.moon.y = moonPos.y
         this.moon.phase = moonPos.phase
         
-        // Update and render animated Julia fractal starfield using unified time
-        this.updateJuliaFractal(timeOfDay, fractalSpeed, fractalIntensity)
+        // Update lightning system - realistic lightning effect only at night, sometimes
+        this.updateLightningSystem(timeOfDay, time, lightningIntensity, lightningFrequency)
         
         // Update Northern Lights for dynamic behavior using unified time
         this.updateNorthernLights(timeOfDay, time)
@@ -1798,35 +2412,35 @@ class SkySystem2D {
             this.renderRainbow(pl, timeOfDay, screenHeight, 1.0)
         }
         
-        // Render Julia fractal stars (MIDDLE LAYER)
+        // Render lightning effect (MIDDLE LAYER)
         for (let i = 0; i < this.stars.length; i++) {
             const star = this.stars[i]
             
-            // Stars are more visible at night with smooth transitions (with transparency)
+            // Lightning is only visible at night with smooth transitions
             let timeAlpha: number
             if (timeOfDay < 0.2 || timeOfDay > 0.8) {
-                timeAlpha = 0.8 // High visibility at night for fractal beauty
+                timeAlpha = 0.9 // High visibility at night for lightning effect
             } else if (timeOfDay < 0.3 || timeOfDay > 0.7) {
                 // Smooth fade during dawn/dusk
                 const fadeOut = timeOfDay < 0.3 ? (0.3 - timeOfDay) / 0.1 : (timeOfDay - 0.7) / 0.1
-                timeAlpha = fadeOut * 0.8
+                timeAlpha = fadeOut * 0.9
             } else {
-                timeAlpha = 0.1 // Subtle visibility during day for ethereal effect
+                timeAlpha = 0.0 // Lightning not visible during day
             }
             
-            // Smooth breathing effect for fractal animation using unified time
-            const breathe = 0.7 + 0.3 * Math.sin(timeOfDay * Math.PI * 6 + i * 0.1)
-            const alpha = star.brightness * timeAlpha * breathe * 0.7 // Base transparency
+            // Dynamic flicker effect for lightning animation using unified time
+            const flicker = 0.8 + 0.2 * Math.sin(timeOfDay * Math.PI * 12 + i * 0.2)
+            const alpha = star.brightness * timeAlpha * flicker * 0.9 // High intensity
             
             // Only render if star is within screen bounds AND above horizon AND visible
             if (star.x >= -1 && star.x < this.width + 1 && star.y >= -1 && star.y < horizonY + 1 && alpha > 0.05) {
                 const starColor = star.color.copy()
                 starColor.a = alpha
                 
-                // Draw fractal star with subpixel precision for smooth movement
+                // Draw lightning with subpixel precision for smooth movement
                 this.renderSubpixelStar(pl, star.x, star.y, starColor)
                 
-                // Add subtle glow effect for brighter fractal points (at night)
+                // Add subtle glow effect for brighter lightning points (at night)
                 if (star.brightness > 0.6 && timeAlpha > 0.6) {
                     const glowColor = starColor.copy()
                     glowColor.a *= 0.3
@@ -1836,6 +2450,159 @@ class SkySystem2D {
                     this.renderSubpixelStar(pl, star.x + 1, star.y, glowColor)
                     this.renderSubpixelStar(pl, star.x - 1, star.y, glowColor)
                     this.renderSubpixelStar(pl, star.x, star.y + 1, glowColor)
+                }
+            }
+        }
+        
+        // Render clouds with wind movement and realistic time-based colors
+        for (let i = 0; i < this.clouds.length; i++) {
+            const cloud = this.clouds[i]
+            // Enhanced wind movement - clouds drift horizontally based on wind speed and time
+            const windDrift = timeOfDay * windSpeed * 100  // Constant horizontal drift with wind
+            const windTurbulence = Math.sin(timeOfDay * Math.PI * 6 + i * 0.7) * 8 * Math.abs(windSpeed)  // Wind turbulence
+            const currentX = (cloud.baseX + windDrift + windTurbulence) % (this.width + cloud.size * 3)  // Wrap around screen
+            const currentY = cloud.y + Math.sin(timeOfDay * Math.PI * 1.5 + i) * 1.5  // Gentle vertical float
+            // Update cloud position for next frame
+            cloud.x = currentX
+            const cloudX = Math.floor(currentX)
+            const cloudY = Math.floor(currentY)
+            // Only render cloud if it's above the horizon and visible enough
+            if (cloudY < horizonY) {
+                // Calculate realistic cloud color based on time of day
+                let cloudColor: Color
+                
+                if (timeOfDay < 0.18 || timeOfDay > 0.82) {
+                    // Deep night - very dark clouds, almost black with blue tint
+                    cloudColor = new Color(15, 20, 35, 1, true)
+                } else if (timeOfDay < 0.25 || timeOfDay > 0.75) {
+                    // Dawn/dusk transition - dark purple-gray with hints of the sky colors
+                    const isRising = timeOfDay < 0.5
+                    const twilightProgress = isRising ? (timeOfDay - 0.18) / 0.07 : (0.82 - timeOfDay) / 0.07
+                    cloudColor = new Color(
+                        Math.floor(15 + twilightProgress * 45),  // Dark to purple-red
+                        Math.floor(20 + twilightProgress * 25),  // Slight warmth
+                        Math.floor(35 + twilightProgress * 25),  // Blue to neutral
+                        1, true
+                    )
+                } else if (timeOfDay < 0.32 || timeOfDay > 0.68) {
+                    // Early morning/late evening - warm gray with golden tints
+                    const isRising = timeOfDay < 0.5
+                    const goldenProgress = isRising ? (timeOfDay - 0.25) / 0.07 : (0.75 - timeOfDay) / 0.07
+                    cloudColor = new Color(
+                        Math.floor(60 + goldenProgress * 80),   // Warm gray to golden
+                        Math.floor(45 + goldenProgress * 65),   // Golden tint
+                        Math.floor(60 + goldenProgress * 40),   // Less blue, warmer
+                        1, true
+                    )
+                } else if (timeOfDay < 0.4 || timeOfDay > 0.6) {
+                    // Golden hour - clouds lit with warm golden light
+                    const goldenIntensity = Math.sin((timeOfDay - 0.32) * Math.PI / 0.36) // Peak at sunrise/sunset
+                    cloudColor = new Color(
+                        Math.floor(140 + goldenIntensity * 80),  // Bright warm light
+                        Math.floor(110 + goldenIntensity * 70),  // Golden
+                        Math.floor(100 + goldenIntensity * 50),  // Less blue for warmth
+                        1, true
+                    )
+                } else {
+                    // Full daylight - bright white/light gray clouds
+                    const noonDistance = Math.abs(timeOfDay - 0.5) // Distance from noon
+                    const brightness = 1.0 - noonDistance * 0.3    // Brightest at noon
+                    cloudColor = new Color(
+                        Math.floor(200 + brightness * 55),      // Bright white
+                        Math.floor(210 + brightness * 45),      // Slightly warm white
+                        Math.floor(220 + brightness * 35),      // Cool white
+                        1, true
+                    )
+                }
+                
+                // Draw cloud as clusters of overlapping horizontal lines
+                const cloudLayers = Math.floor(cloud.size * 0.8)
+                const maxWidth = cloud.size * 3
+                for (let layer = 0; layer < cloudLayers; layer++) {
+                    // Calculate line properties based on layer position
+                    const layerY = cloudY + layer - Math.floor(cloudLayers / 2)
+                    const distanceFromCenter = Math.abs(layer - cloudLayers / 2)
+                    // Only render cloud layers that are above horizon
+                    if (layerY >= 0 && layerY < horizonY) {
+                        // Lower lines (further from center) are smaller and more transparent
+                        const widthMultiplier = 1.0 - (distanceFromCenter / cloudLayers) * 0.7
+                        const lineWidth = Math.floor(maxWidth * widthMultiplier)
+                        const baseTransparency = (0.4 - (distanceFromCenter / cloudLayers) * 0.3) * 
+                                               (0.8 + 0.2 * Math.sin(timeOfDay * Math.PI * 6 + layer + i))
+                        // Apply time-based opacity modifier - clouds more visible during day but more transparent overall
+                        let timeOpacity: number
+                        if (timeOfDay < 0.2 || timeOfDay > 0.8) {
+                            timeOpacity = 0.4 // More transparent at night
+                        } else if (timeOfDay < 0.35 || timeOfDay > 0.65) {
+                            timeOpacity = 0.6 // Medium transparency during twilight
+                        } else {
+                            timeOpacity = 0.7 // Still quite transparent during day
+                        }
+                        
+                        const finalTransparency = baseTransparency * timeOpacity * 0.6  // Additional 0.6 multiplier for overall transparency
+                        // Use the calculated realistic cloud color
+                        const layerCloudColor = cloudColor.copy()
+                        layerCloudColor.a = Math.max(0.02, finalTransparency * 0.5)  // More transparent overall
+                        
+                        // Enhanced fuzzy cloud rendering with scattered pixels and gradual edges
+                        // Create fuzzy cloud core
+                        for (let thickness = 0; thickness < 2; thickness++) {
+                            for (let x = cloudX - Math.floor(lineWidth / 2); x <= cloudX + Math.floor(lineWidth / 2); x++) {
+                                if (x >= 0 && x < this.width) {
+                                    // Distance-based opacity falloff for fuzzy edges
+                                    const distanceFromCenter = Math.abs(x - cloudX) / (lineWidth / 2)
+                                    const edgeFalloff = Math.max(0.1, 1.0 - Math.pow(distanceFromCenter, 1.5))  // Smooth falloff
+                                    
+                                    const fuzzyCoreColor = layerCloudColor.copy()
+                                    fuzzyCoreColor.a *= edgeFalloff
+                                    
+                                    if (fuzzyCoreColor.a > 0.01) {
+                                        pl.add(new Pixel(x, layerY + thickness, fuzzyCoreColor))
+                                    }
+                                }
+                            }
+                        }
+                        
+                        // Add scattered fuzzy edge pixels for wispy cloud effect
+                        const edgePixelCount = Math.floor(lineWidth * 0.8)
+                        for (let edge = 0; edge < edgePixelCount; edge++) {
+                            if (Math.random() < 0.4) {  // 40% chance for each edge pixel
+                                const edgeX = cloudX - Math.floor(lineWidth * 0.7) + Math.floor(Math.random() * lineWidth * 1.4)
+                                const edgeY = layerY + Math.floor(Math.random() * 3) - 1  // Slight vertical scatter
+                                
+                                if (edgeX >= 0 && edgeX < this.width && edgeY >= 0 && edgeY < horizonY) {
+                                    const edgeColor = layerCloudColor.copy()
+                                    edgeColor.a *= 0.3 + Math.random() * 0.4  // Random transparency for wispy effect
+                                    
+                                    if (edgeColor.a > 0.01) {
+                                        pl.add(new Pixel(edgeX, edgeY, edgeColor))
+                                    }
+                                }
+                            }
+                        }
+                        
+                        // Add additional wispy trails in wind direction
+                        if (Math.abs(windSpeed) > 0.1) {
+                            const trailLength = Math.floor(Math.abs(windSpeed) * 15)
+                            const trailDirection = windSpeed > 0 ? 1 : -1
+                            
+                            for (let trail = 1; trail <= trailLength; trail++) {
+                                if (Math.random() < 0.3) {  // 30% chance for trail pixels
+                                    const trailX = cloudX + (trail * trailDirection)
+                                    const trailY = layerY + Math.floor(Math.random() * 2) - 1
+                                    
+                                    if (trailX >= 0 && trailX < this.width && trailY >= 0 && trailY < horizonY) {
+                                        const trailColor = layerCloudColor.copy()
+                                        trailColor.a *= (0.5 - (trail / trailLength) * 0.4)  // Fade out with distance
+                                        
+                                        if (trailColor.a > 0.01) {
+                                            pl.add(new Pixel(trailX, trailY, trailColor))
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -1892,7 +2659,77 @@ class SkySystem2D {
             this.drawMoonWithPhase(pl, this.moon.x, this.moon.y, this.moon.radius, this.moon.phase, horizonY, moonVisibility)
         }
         
+        // Render distant skyline objects for depth illusion
+        this.renderSkylineObjects(pl, timeOfDay, horizonY)
+        
         return pl
+    }
+    
+    // Render skyline objects with time-based lighting and atmospheric perspective
+    renderSkylineObjects(pl: PixelList, timeOfDay: number, horizonY: number) {
+        // Calculate atmospheric visibility based on time of day
+        let visibility: number
+        if (timeOfDay < 0.2 || timeOfDay > 0.8) {
+            visibility = 0.6 // More visible at night (silhouettes)
+        } else if (timeOfDay < 0.35 || timeOfDay > 0.65) {
+            // Dawn/dusk - objects become silhouettes
+            const duskFactor = timeOfDay < 0.35 ? (0.35 - timeOfDay) / 0.15 : (timeOfDay - 0.65) / 0.15
+            visibility = 0.6 + duskFactor * 0.3
+        } else {
+            visibility = 0.9 // More visible during day (less atmospheric haze)
+        }
+        
+        for (const obj of this.skylineObjects) {
+            // Skip if object is below horizon
+            if (obj.y >= horizonY) continue
+            
+            // Calculate time-based color modification
+            const objColor = obj.color.copy()
+            objColor.a *= visibility
+            
+            // Add atmospheric haze effect during day
+            if (timeOfDay > 0.35 && timeOfDay < 0.65) {
+                // Blend with sky color during day for atmospheric perspective
+                const hazeAmount = 0.6
+                objColor.r = Math.floor(objColor.r * (1 - hazeAmount) + 150 * hazeAmount)
+                objColor.g = Math.floor(objColor.g * (1 - hazeAmount) + 180 * hazeAmount)
+                objColor.b = Math.floor(objColor.b * (1 - hazeAmount) + 200 * hazeAmount)
+            }
+            
+            // Render object with fuzzy edges for distance effect
+            for (let x = 0; x < obj.width; x++) {
+                for (let y = 0; y < obj.height; y++) {
+                    const pixelX = obj.x + x
+                    const pixelY = obj.y + y
+                    
+                    // Skip if out of bounds or below horizon
+                    if (pixelX < 0 || pixelX >= this.width || pixelY < 0 || pixelY >= horizonY) continue
+                    
+                    // Create fuzzy effect by reducing opacity at edges
+                    let edgeFactor = 1.0
+                    if (obj.type === "hill") {
+                        // Hills have softer, more natural edges
+                        const centerX = obj.width / 2
+                        const centerY = obj.height / 2
+                        const distFromCenter = Math.sqrt((x - centerX) ** 2 + (y - centerY) ** 2)
+                        const maxDist = Math.sqrt(centerX ** 2 + centerY ** 2)
+                        edgeFactor = Math.max(0.2, 1.0 - (distFromCenter / maxDist) * 0.6)
+                    } else {
+                        // Buildings and trees have slight edge softening
+                        const isEdge = x === 0 || x === obj.width - 1 || y === 0 || y === obj.height - 1
+                        edgeFactor = isEdge ? 0.6 : 1.0
+                    }
+                    
+                    const finalColor = objColor.copy()
+                    finalColor.a *= edgeFactor
+                    
+                    // Only render if alpha is significant enough
+                    if (finalColor.a > 0.05) {
+                        pl.add(new Pixel(pixelX, pixelY, finalColor))
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -1907,8 +2744,8 @@ export default class Synthwave extends Animator {
         const speedControl = synthControls.value("Animation Speed", 1, 0.1, 3, 0.1, true)
         const windControl = synthControls.value("Wind Speed", 0.21, -1, 1, 0.01, true)  // Wind: -1=left, 0=still, +1=right
         const dayLengthControl = synthControls.value("Day Length (seconds)", 60, 10, 300, 5, true)  // Configurable day length
-        const fractalSpeedControl = synthControls.value("Fractal Animation Speed", 1.0, 0.1, 3.0, 0.1, true)  // Julia fractal animation speed
-        const fractalIntensityControl = synthControls.value("Fractal Intensity", 0.7, 0.1, 1.5, 0.1, true)  // Julia fractal brightness
+        const lightningSpeedControl = synthControls.value("Lightning Frequency", 1.0, 0.1, 3.0, 0.1, true)  // Lightning occurrence frequency
+        const lightningIntensityControl = synthControls.value("Lightning Intensity", 0.7, 0.1, 1.5, 0.1, true)  // Lightning brightness
         const auroraIntensityControl = synthControls.value("Aurora Intensity", 0.8, 0.0, 2.0, 0.1, true)  // Northern Lights intensity
         const showStarsControl = synthControls.switch("Show Stars", true, false)
         const showAuroraControl = synthControls.switch("Show Northern Lights", true, false)
@@ -1925,7 +2762,7 @@ export default class Synthwave extends Animator {
         // Setup 3D camera with error checking
         let camera: Camera3D
         let renderer: Renderer3D
-        let tower: Tower3D
+        let fractalTree: FractalTree3D
         let skySystem: SkySystem2D
         
         try {
@@ -1938,7 +2775,7 @@ export default class Synthwave extends Animator {
             renderer = new Renderer3D(width, height, camera)
             
             // Create 3D objects with optimal sizing for small screen visibility
-            tower = new Tower3D() // Red block tower
+            fractalTree = new FractalTree3D() // Growing fractal tree system
             skySystem = new SkySystem2D(width, height)
         } catch (error) {
             console.error("Failed to initialize 3D objects:", error)
@@ -2029,7 +2866,7 @@ export default class Synthwave extends Animator {
                     1, true
                 )
             } else {
-                // Full daylight - realistic atmospheric blue with horizon whitening
+                // Full daylight - bright white with subtle temperature variations
                 const noonDistance = Math.abs(timeOfDay - 0.5)
                 const dayStrength = Math.cos(noonDistance * Math.PI / 0.12)
                 
@@ -2168,7 +3005,7 @@ export default class Synthwave extends Animator {
                     // Render sky system FIRST as background layer (behind all 3D objects)
                     if (showStarsControl.enabled && skySystem) {
                         console.log("Rendering sky system as background...")
-                        pl.add(skySystem.render(time, timeOfDay, windControl.value, height, fractalSpeedControl.value, fractalIntensityControl.value, auroraIntensityControl.value, showAuroraControl.enabled))
+                        pl.add(skySystem.render(time, timeOfDay, windControl.value, height, lightningSpeedControl.value, lightningIntensityControl.value, auroraIntensityControl.value, showAuroraControl.enabled))
                     }
                     
                     // Render 3D objects with error checking and realistic lighting
@@ -2183,17 +3020,15 @@ export default class Synthwave extends Animator {
                         pl.add(new Pixel(width-1, y, colors.neonCyan))
                     }
                     
-                    if (tower) {
-                        console.log("Rendering tower with lighting multiplier:", lightingMultiplier.toFixed(2))
+                    if (fractalTree) {
+                        console.log("Rendering fractal tree with lighting multiplier:", lightingMultiplier.toFixed(2))
                         
-                        // Update tower sparks
-                        tower.updateSparks()
+                        // Update fractal tree with seasonal growth
+                        const dayOfYear = Math.floor((time / speedControl.value) / framesPerDay) % 12
+                        fractalTree.update(timeOfDay, dayOfYear)
                         
-                        // Render tower structure
-                        pl.add(renderer.renderMesh(tower, false, noClipControl.enabled, lightingMultiplier))
-                        
-                        // Render sparks on top of tower
-                        pl.add(tower.renderSparks(renderer))
+                        // Render fractal tree structure
+                        pl.add(renderer.renderMesh(fractalTree, false, noClipControl.enabled, lightingMultiplier))
                     }
                 } catch (error) {
                     console.error("3D rendering error:", error)
